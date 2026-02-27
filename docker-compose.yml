@@ -163,6 +163,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      mock-payment-provider:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -176,6 +178,21 @@ services:
       retries: 3
       start_period: 40s
 
+  mock-payment-provider:
+    build:
+      context: ./mock_provider
+      dockerfile: Dockerfile
+    container_name: mock-payment-provider
+    restart: unless-stopped
+    ports:
+    - "8001:8001"
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
 volumes:
   postgres-data:
@@ -189,6 +206,8 @@ volumes:
   grafana-data:
     driver: local
   prometheus-data:
+    driver: local
+  mock-payment-provider:
     driver: local
 
 
