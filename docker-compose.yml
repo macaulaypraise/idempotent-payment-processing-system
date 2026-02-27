@@ -207,8 +207,6 @@ volumes:
     driver: local
   prometheus-data:
     driver: local
-  mock-payment-provider:
-    driver: local
 
 
 networks:

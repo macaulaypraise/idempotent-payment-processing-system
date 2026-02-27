@@ -18,7 +18,9 @@ dependencies = [
     "redis[hiredis] (>=7.2.1,<8.0.0)",
     "aiokafka (>=0.13.0,<0.14.0)",
     "httpx (>=0.28.1,<0.29.0)",
-    "structlog (>=25.5.0,<26.0.0)"
+    "structlog (>=25.5.0,<26.0.0)",
+    "pydantic[email] (>=2.12.5,<3.0.0)",
+    "prometheus-client (>=0.24.1,<0.25.0)"
 ]
 
 

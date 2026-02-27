@@ -1,6 +1,8 @@
 import uuid
 import json
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from redis.asyncio import Redis
 from app.models.payment import Payment, PaymentStatus
 from app.models.outbox_event import OutboxEvent
@@ -18,18 +20,15 @@ async def create_payment(
     amount: float,
     currency: str
 ) -> dict:
-    # Step 1: check cache — return immediately if hit
     cached = await get_cached_response(redis, idempotency_key)
     if cached:
-        return cached
+        return cached.get("body", cached)
 
-    # Step 2: acquire lock — return 409 if cannot acquire
     lock_acquired = await acquire_lock(redis, idempotency_key)
     if not lock_acquired:
         raise ValueError("Duplicate request in progress")
 
     try:
-        # Step 3: open DB transaction
         payment = Payment(
             id=uuid.uuid4(),
             idempotency_key=idempotency_key,
@@ -39,8 +38,6 @@ async def create_payment(
             version=1
         )
         db.add(payment)
-
-        # create outbox event in same transaction
         outbox_event = OutboxEvent(
             id=uuid.uuid4(),
             event_type="payment.initiated",
@@ -54,7 +51,6 @@ async def create_payment(
         await db.commit()
         await db.refresh(payment)
 
-        # Step 4: cache the response
         response = {
             "payment_id": str(payment.id),
             "status": payment.status.value,
@@ -64,10 +60,23 @@ async def create_payment(
         await cache_response(redis, idempotency_key, response, 202)
         return response
 
+    except IntegrityError:
+        await db.rollback()
+        result = await db.execute(
+            select(Payment).where(Payment.idempotency_key == idempotency_key)
+        )
+        existing = result.scalar_one()
+        response = {
+            "payment_id": str(existing.id),
+            "status": existing.status.value,
+            "amount": str(existing.amount),
+            "currency": existing.currency
+        }
+        await cache_response(redis, idempotency_key, response, 202)
+        return response
+
     except Exception as e:
         await db.rollback()
         raise e
-
     finally:
-        # Step 5: always release lock
         await release_lock(redis, idempotency_key)

@@ -8,6 +8,7 @@ RUN pip install poetry
 COPY pyproject.toml poetry.lock ./
 
 RUN poetry config virtualenvs.in-project true && \
+    poetry install --no-root --only main || \
     poetry install --no-root --only main
 
 # ── Stage 2: runtime ──────────────────────────────
