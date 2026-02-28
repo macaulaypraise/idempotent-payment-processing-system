@@ -133,6 +133,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
+
   api:
     build:
       context: .
@@ -141,19 +142,6 @@ services:
     container_name: fastapi-app
     restart: unless-stopped
     env_file: .env
-    environment:
-      - WORKERS=${WORKERS:-4}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - TIMEOUT=${TIMEOUT:-30}
-      - ENVIRONMENT=${ENVIRONMENT:-production}
-      - ENABLE_TRACING=${ENABLE_TRACING:-true}
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
-      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
-      - ELASTICSEARCH_URL=${ELASTICSEARCH_URL}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
-      - LOKI_URL=${LOKI_URL}
-      - PROMETHEUS_MULTIPROC_DIR=${PROMETHEUS_MULTIPROC_DIR}
     ports:
       - "8000:8000"
     depends_on:
@@ -193,6 +181,40 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  outbox_poller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    command: .venv/bin/python -m app.workers.outbox_poller
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  settlement_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    command: .venv/bin/python -m app.workers.settlement_worker
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-payment-provider:
+        condition: service_healthy
 
 volumes:
   postgres-data:

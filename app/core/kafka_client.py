@@ -6,7 +6,6 @@ settings = get_settings()
 async def create_kafka_producer() -> AIOKafkaProducer:
     producer = AIOKafkaProducer(
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
-        value_serializer=lambda v: v.encode("utf-8")
     )
     await producer.start()
     return producer

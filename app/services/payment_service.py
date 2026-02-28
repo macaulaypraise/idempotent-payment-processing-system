@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from redis.asyncio import Redis
 from app.models.payment import Payment, PaymentStatus
 from app.models.outbox_event import OutboxEvent
+from app.core.metrics import payments_created_total
 from app.services.idempotency import (
     get_cached_response,
     cache_response,
@@ -22,6 +23,7 @@ async def create_payment(
 ) -> dict:
     cached = await get_cached_response(redis, idempotency_key)
     if cached:
+        payments_created_total.labels(status="idempotent_hit").inc()
         return cached.get("body", cached)
 
     lock_acquired = await acquire_lock(redis, idempotency_key)
@@ -50,7 +52,6 @@ async def create_payment(
         db.add(outbox_event)
         await db.commit()
         await db.refresh(payment)
-
         response = {
             "payment_id": str(payment.id),
             "status": payment.status.value,
@@ -58,6 +59,7 @@ async def create_payment(
             "currency": payment.currency
         }
         await cache_response(redis, idempotency_key, response, 202)
+        payments_created_total.labels(status="success").inc()
         return response
 
     except IntegrityError:
@@ -73,10 +75,12 @@ async def create_payment(
             "currency": existing.currency
         }
         await cache_response(redis, idempotency_key, response, 202)
+        payments_created_total.labels(status="conflict").inc()
         return response
 
     except Exception as e:
         await db.rollback()
         raise e
+
     finally:
         await release_lock(redis, idempotency_key)

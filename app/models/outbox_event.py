@@ -23,7 +23,7 @@ class OutboxEvent(Base):
     published_at = mapped_column(
         DateTime(timezone=True),
         nullable=True,
-        default=lambda: datetime.now(timezone.utc)
+        default=None
     )
     created_at = mapped_column(
         DateTime(timezone=True),

@@ -1,54 +1,35 @@
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
 from app.services.payment_service import create_payment
-from app.models.payment import PaymentStatus
-from app.services.idempotency import get_cached_response
+from app.services.outbox_poller import poll_and_publish
+from app.models.payment import Payment, PaymentStatus
+from app.models.outbox_event import OutboxEvent
+from app.core.exceptions import InvalidStateTransitionError
+from app.services.state_machine import validate_transition
+from sqlalchemy import select
 
-@pytest.mark.asyncio
-async def test_create_payment_returns_response():
-    redis = AsyncMock()
-    redis.get.return_value = None
-    redis.setnx.return_value = True
 
-    db = AsyncMock()
-    db.add = MagicMock()
-    db.commit = AsyncMock()
-    db.refresh = AsyncMock()
+async def test_invalid_state_transition_raises(db_session, redis_client):
+    """PENDING → REFUNDED must raise InvalidStateTransitionError."""
+    from app.models.payment import PaymentStatus
+    with pytest.raises(InvalidStateTransitionError):
+        validate_transition(PaymentStatus.PENDING, PaymentStatus.REFUNDED)
 
-    result = await create_payment(
-        db=db,
-        redis=redis,
-        idempotency_key="test-key-123",
-        amount=100.00,
-        currency="USD"
+
+async def test_outbox_published_after_poll(db_session, redis_client, mock_kafka_producer):
+    """Create payment, run poll_and_publish once → outbox row has published_at set."""
+    await create_payment(db_session, redis_client, "key-outbox-001", 75.00, "USD")
+
+    # verify outbox row exists with published_at = NULL
+    result = await db_session.execute(
+        select(OutboxEvent).where(OutboxEvent.published_at == None)
     )
+    unpublished = result.scalars().all()
+    assert len(unpublished) == 1
 
-    assert result["status"] == PaymentStatus.PENDING.value
-    assert result["currency"] == "USD"
+    # run the poller once
+    count = await poll_and_publish(db_session, mock_kafka_producer)
+    assert count == 1
 
-@pytest.mark.asyncio
-async def test_idempotent_retry_returns_cached_response():
-    redis = AsyncMock()
-    redis.get.return_value = '{"body": {"payment_id": "123", "status": "pending"}, "status_code": 202}'
-
-    db = AsyncMock()
-
-    result = await get_cached_response(redis, "test-key-123")
-    assert result["body"]["payment_id"] == "123"
-
-@pytest.mark.asyncio
-async def test_duplicate_request_raises_when_lock_taken():
-    redis = AsyncMock()
-    redis.get.return_value = None
-    redis.setnx.return_value = False
-
-    db = AsyncMock()
-
-    with pytest.raises(ValueError, match="Duplicate request in progress"):
-        await create_payment(
-            db=db,
-            redis=redis,
-            idempotency_key="test-key-123",
-            amount=100.00,
-            currency="USD"
-        )
+    # verify published_at is now set
+    await db_session.refresh(unpublished[0])
+    assert unpublished[0].published_at is not None

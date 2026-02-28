@@ -1,15 +1,13 @@
-from sqlalchemy import text
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from contextlib import asynccontextmanager
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from app.core.redis_client import create_redis_client, close_redis_client
-from app.core.kafka_client import create_kafka_producer, create_kafka_consumer, close_kafka_producer, close_kafka_consumer
+from app.core.kafka_client import create_kafka_producer, close_kafka_producer
 from app.core.http_client import create_http_client, close_http_client
-from app.core.database import engine
 from app.core.logging import setup_logging
-from app.routers import payments, webhooks
 from app.core.exceptions import IdempotencyConflictError, PaymentNotFoundError, InvalidStateTransitionError
+from app.routers import payments, webhooks, health
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -26,6 +24,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.include_router(payments.router, tags=["payments"])
 app.include_router(webhooks.router, tags=["webhooks"])
+app.include_router(health.router, tags=["health"])
 
 @app.get("/metrics")
 async def metrics():
@@ -42,18 +41,3 @@ async def payment_not_found_handler(request: Request, exc: PaymentNotFoundError)
 @app.exception_handler(InvalidStateTransitionError)
 async def invalid_state_handler(request: Request, exc: InvalidStateTransitionError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-
-@app.get("/health")
-async def health(request: Request):
-    try:
-        await request.app.state.redis.ping()
-        redis_status = "ok"
-    except Exception:
-        redis_status = "error"
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        db_status = "ok"
-    except Exception:
-        db_status = "error"
-    return {"status": "ok", "redis": redis_status, "db": db_status}
