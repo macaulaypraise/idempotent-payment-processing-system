@@ -1,0 +1,38 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy to Railway
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+          RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
+          RAILWAY_WORKER_1: ${{ secrets.RAILWAY_WORKER_1 }}
+          RAILWAY_WORKER_2: ${{ secrets.RAILWAY_WORKER_2 }}
+        run: |
+          railway up --service $RAILWAY_SERVICE --detach
+          railway up --service $RAILWAY_WORKER_1 --detach
+          railway up --service $RAILWAY_WORKER_2 --detach

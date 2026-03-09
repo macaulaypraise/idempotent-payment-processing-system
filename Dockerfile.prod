@@ -1,0 +1,46 @@
+# =============================================================================
+# Production Dockerfile — multi-stage build
+# Stage 1 (builder): installs Poetry + dependencies into a virtualenv
+# Stage 2 (runtime): copies only the virtualenv and app code — no dev tools
+# =============================================================================
+
+# ── Stage 1: builder ─────────────────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+# Install Poetry
+RUN pip install --no-cache-dir poetry==2.3.2
+
+# Copy dependency files first — maximises Docker layer cache
+# Re-installs only when pyproject.toml or poetry.lock changes
+COPY pyproject.toml poetry.lock ./
+
+# Install runtime dependencies only into an in-project virtualenv
+RUN poetry config virtualenvs.in-project true && \
+    poetry install --only main --no-interaction --no-ansi
+
+# ── Stage 2: runtime ─────────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+WORKDIR /app
+
+# Copy the virtualenv built in stage 1
+COPY --from=builder /app/.venv /app/.venv
+
+# Copy application source
+COPY app/ ./app/
+COPY migrations/ ./migrations/
+COPY alembic.ini ./
+
+# Run as non-root user (security best practice)
+RUN useradd --no-create-home --shell /bin/false appuser
+USER appuser
+
+# Make the virtualenv's binaries available
+ENV PATH="/app/.venv/bin:$PATH"
+
+EXPOSE 8000
+
+# Railway injects PORT env var — fall back to 8000 locally
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

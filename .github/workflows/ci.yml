@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    name: Lint · Type-check · Test
+    runs-on: ubuntu-latest
+    # Sidecar services — available to the job at localhost:<port>
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+      postgres:
+        image: postgres:15
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: payments_test
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    # Environment — matches .env.example, overridden for CI
+    env:
+      APP_ENV: test
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+
+      # CI runner now uses the generic ephemeral database credentials securely
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/payments_test
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/payments_test
+      TEST_REDIS_URL: redis://localhost:6379/0
+      REDIS_URL: redis://localhost:6379/0
+
+      # Kafka not available as a sidecar — tests that need it use mocks
+      KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+      KAFKA_TOPIC_PAYMENT_INITIATED: payment.initiated
+      KAFKA_TOPIC_PAYMENT_COMPLETED: payment.completed
+      KAFKA_TOPIC_PAYMENT_FAILED: payment.failed
+      KAFKA_TOPIC_DLQ: payment.dlq
+      KAFKA_CONSUMER_GROUP: settlement-worker
+
+      IDEMPOTENCY_TTL_SECONDS: 86400
+      IDEMPOTENCY_LOCK_TTL_SECONDS: 30
+
+      PAYMENT_PROVIDER_URL: http://localhost:8001/charge
+      PAYMENT_PROVIDER_TIMEOUT_SECONDS: 10
+      PAYMENT_MAX_RETRIES: 5
+      PAYMENT_RETRY_BASE_DELAY_SECONDS: 1
+
+      OUTBOX_BATCH_SIZE: 100
+      OUTBOX_IDLE_SLEEP_SECONDS: 2
+
+      LOG_LEVEL: WARNING
+      SERVICE_NAME: ipps-payment-api
+      METRICS_PATH: /metrics
+
+    steps:
+      # 1. Checkout
+      - name: Checkout code
+        uses: actions/checkout@v4
+      # 2. Python setup
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # 3. Poetry + dependency install
+      #    Cache keyed on poetry.lock so re-installs only happen when
+      #    dependencies actually change.
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: ${{ runner.os }}-poetry-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      # 4. Lint (ruff)
+      - name: Lint with ruff
+        run: poetry run ruff check .
+
+      # 5. Type check (mypy)
+      - name: Type check with mypy
+        run: poetry run mypy .
+
+      # 6. Run database migrations against the test DB
+      - name: Run Alembic migrations
+        run: poetry run alembic upgrade head
+
+      # 7. Run All Tests & Generate Coverage (Consolidated)
+      - name: Run tests and collect coverage
+        run: |
+          poetry run pytest tests/ \
+            -v \
+            --tb=short \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=80
+
+      # 8. Upload coverage report
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7

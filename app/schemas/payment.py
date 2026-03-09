@@ -1,12 +1,12 @@
-from pydantic import BaseModel, ConfigDict
-from decimal import Decimal
-from uuid import UUID
 from datetime import datetime
-from app.models.payment import PaymentStatus
+
+from pydantic import BaseModel, ConfigDict, Field
+
 
 class PaymentRequest(BaseModel):
-    amount: Decimal
+    amount: float = Field(gt=0, description="Payment amount must be greater than zero")
     currency: str
+
 
 class PaymentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -14,3 +14,5 @@ class PaymentResponse(BaseModel):
     status: str
     amount: str
     currency: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None

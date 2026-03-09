@@ -1,15 +1,19 @@
-from sqlalchemy import text
-from fastapi import APIRouter, Request
+from typing import Any
+
 from aiokafka.admin import AIOKafkaAdminClient
-from app.core.database import engine
+from fastapi import APIRouter, Request
+from sqlalchemy import text
+
 from app.config import get_settings
+from app.core.database import engine
+from app.core.kafka_client import _kafka_ssl_kwargs
 
 router = APIRouter()
 settings = get_settings()
 
 
 @router.get("/health")
-async def health(request: Request):
+async def health(request: Request) -> dict[str, Any]:
     try:
         await request.app.state.redis.ping()
         redis_status = "ok"
@@ -25,7 +29,7 @@ async def health(request: Request):
 
     try:
         admin = AIOKafkaAdminClient(
-            bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS
+            bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS, **_kafka_ssl_kwargs()
         )
         await admin.start()
         await admin.close()
@@ -33,13 +37,15 @@ async def health(request: Request):
     except Exception:
         kafka_status = "error"
 
-    overall = "ok" if all(
-        s == "ok" for s in [redis_status, db_status, kafka_status]
-    ) else "degraded"
+    overall = (
+        "ok"
+        if all(s == "ok" for s in [redis_status, db_status, kafka_status])
+        else "degraded"
+    )
 
     return {
         "status": overall,
         "redis": redis_status,
         "db": db_status,
-        "kafka": kafka_status
+        "kafka": kafka_status,
     }

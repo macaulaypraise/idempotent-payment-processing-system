@@ -1,1 +1,45 @@
+# Environments
 .env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.env.test
+
+# Environment Example (Explicitly allowing this to be tracked)
+!.env.example
+
+# Python Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Linter and Type Checker Caches
+.mypy_cache/
+.ruff_cache/
+
+# Test and Coverage Artifacts
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+repo-structure.txt
+extensions.txt
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

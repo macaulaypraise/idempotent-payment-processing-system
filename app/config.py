@@ -1,14 +1,14 @@
 from functools import lru_cache
-from pydantic import ConfigDict
-from pydantic_settings import BaseSettings
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(
-        env_file=".env",
-        case_sensitive=True,
-        extra="ignore"
+    model_config = SettingsConfigDict(
+        env_file=".env", case_sensitive=True, extra="ignore"
     )
-    #App
+
+    # App
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
@@ -21,12 +21,20 @@ class Settings(BaseSettings):
 
     # Kafka
     KAFKA_BOOTSTRAP_SERVERS: str
+    KAFKA_SECURITY_PROTOCOL: str = "PLAINTEXT"
+    KAFKA_SASL_MECHANISM: str = "SCRAM-SHA-256"
+    KAFKA_SASL_USERNAME: str = ""
+    KAFKA_SASL_PASSWORD: str = ""
 
     # Mock Payment Provider
     PAYMENT_PROVIDER_URL: str = "http://localhost:8001"
 
-@lru_cache()
+    # Test configuration fields
+    IDEMPOTENCY_TTL_SECONDS: int = 86400  # Default 24 hours
+    IDEMPOTENCY_LOCK_TTL_SECONDS: int = 30  # Default 30 seconds
+    PAYMENT_MAX_RETRIES: int = 3  # Default 3 retries
+
+
+@lru_cache
 def get_settings() -> Settings:
     return Settings()
-
-
