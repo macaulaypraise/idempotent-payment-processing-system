@@ -1,15 +1,16 @@
 import asyncio
+
 import structlog
+
 from app.core.database import AsyncSessionFactory
-from app.core.kafka_client import create_kafka_producer, close_kafka_producer
+from app.core.kafka_client import close_kafka_producer, create_kafka_producer
+from app.core.metrics import outbox_lag_seconds
 from app.services.outbox_poller import poll_and_publish
-from app.core.metrics import outbox_lag_seconds, dlq_depth
-from datetime import datetime, timezone
 
 logger = structlog.get_logger()
 
 
-async def run_outbox_poller():
+async def run_outbox_poller() -> None:
     logger.info("outbox_poller_starting")
 
     kafka_producer = await create_kafka_producer()

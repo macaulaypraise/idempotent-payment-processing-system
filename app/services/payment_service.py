@@ -1,34 +1,34 @@
 import uuid
-import json
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any, cast
+
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from redis.asyncio import Redis
-from app.models.payment import Payment, PaymentStatus
-from app.models.outbox_event import OutboxEvent
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import IdempotencyConflictError
 from app.core.metrics import payments_created_total
+from app.models.outbox_event import OutboxEvent
+from app.models.payment import Payment, PaymentStatus
 from app.services.idempotency import (
-    get_cached_response,
-    cache_response,
     acquire_lock,
-    release_lock
+    cache_response,
+    get_cached_response,
+    release_lock,
 )
 
+
 async def create_payment(
-    db: AsyncSession,
-    redis: Redis,
-    idempotency_key: str,
-    amount: float,
-    currency: str
-) -> dict:
+    db: AsyncSession, redis: Redis, idempotency_key: str, amount: float, currency: str
+) -> dict[str, Any]:
     cached = await get_cached_response(redis, idempotency_key)
     if cached:
         payments_created_total.labels(status="idempotent_hit").inc()
-        return cached.get("body", cached)
+        return cast(dict[str, Any], cached.get("body", cached))
 
     lock_acquired = await acquire_lock(redis, idempotency_key)
     if not lock_acquired:
-        raise ValueError("Duplicate request in progress")
+        raise IdempotencyConflictError("Duplicate request in progress")
 
     try:
         payment = Payment(
@@ -37,7 +37,7 @@ async def create_payment(
             amount=amount,
             currency=currency,
             status=PaymentStatus.PENDING,
-            version=1
+            version=1,
         )
         db.add(payment)
         outbox_event = OutboxEvent(
@@ -46,8 +46,8 @@ async def create_payment(
             payload={
                 "payment_id": str(payment.id),
                 "amount": str(amount),
-                "currency": currency
-            }
+                "currency": currency,
+            },
         )
         db.add(outbox_event)
         await db.commit()
@@ -56,7 +56,7 @@ async def create_payment(
             "payment_id": str(payment.id),
             "status": payment.status.value,
             "amount": str(payment.amount),
-            "currency": payment.currency
+            "currency": payment.currency,
         }
         await cache_response(redis, idempotency_key, response, 202)
         payments_created_total.labels(status="success").inc()
@@ -72,7 +72,7 @@ async def create_payment(
             "payment_id": str(existing.id),
             "status": existing.status.value,
             "amount": str(existing.amount),
-            "currency": existing.currency
+            "currency": existing.currency,
         }
         await cache_response(redis, idempotency_key, response, 202)
         payments_created_total.labels(status="conflict").inc()
