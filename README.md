@@ -78,12 +78,16 @@ At 1,000 users the 0.4% error rate is connection pool exhaustion on a single con
 
 ## Quick Start
 
+> The `v2` branch is mid-rebuild ("Ledgerline"); see `CHANGELOG.md` for the
+> current stage. The full README is rewritten at v2.0.
+
 ```bash
-git clone <your-repo-url> && cd idempotent-payment-system
+git clone <your-repo-url> && cd idempotent-payment-processing-system
 
 cp .env.example .env
-make dev          # starts 8 Docker services
-make migrate      # applies Alembic migrations
+make dev                     # starts the stack and applies migrations
+make tenant NAME=demo        # prints tenant_id and api_key (shown once)
+export IPPS_API_KEY=<api_key>
 ```
 
 API live at **http://localhost:8000/docs**
@@ -91,16 +95,20 @@ API live at **http://localhost:8000/docs**
 ```bash
 # Create a payment
 KEY=$(uuidgen)
-curl -X POST http://localhost:8000/payments \
+curl -X POST http://localhost:8000/v1/payments \
+  -H "Authorization: Bearer $IPPS_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $KEY" \
   -d '{"amount": 99.99, "currency": "USD"}'
 
-# Retry — identical response, no second charge
-curl -X POST http://localhost:8000/payments \
+# Retry: identical response with "Idempotent-Replayed: true", no second payment
+curl -i -X POST http://localhost:8000/v1/payments \
+  -H "Authorization: Bearer $IPPS_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $KEY" \
   -d '{"amount": 99.99, "currency": "USD"}'
+
+# Same key, different body: 422. Missing key: 400. Key still in flight: 409.
 ```
 
 ---

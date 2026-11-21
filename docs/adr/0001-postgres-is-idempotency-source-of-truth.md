@@ -1,6 +1,6 @@
 # 0001. Make Postgres the idempotency source of truth; Redis is a cache
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented in Stage 1)
 - **Date:** 2026-11-21
 - **Stage:** 1
 
@@ -52,6 +52,13 @@ What that means under failure (checked against the v1 code on 2026-11-21):
    errors are ignored, and sits behind a small circuit breaker. A cache hit
    still compares fingerprints.
 6. Remove `acquire_lock` / `release_lock` and the Redis lock keys.
+7. Keep `payments` unique on `(tenant_id, idempotency_key)` as a second line
+   of defence. Consequence: once a key row has expired and been swept, reusing
+   that key for a payment is a stored 422 ("already used and expired"), never
+   a second payment. An expired row that has not been swept yet is taken over
+   (`UPDATE … WHERE expires_at <= now`), so the same rule applies.
+8. Replays carry an `Idempotent-Replayed: true` header so a client can tell a
+   replay from a new write.
 
 ## Alternatives considered
 
@@ -70,12 +77,29 @@ What that means under failure (checked against the v1 code on 2026-11-21):
   serving", because "0 duplicates" alone was already true of v1.
 - Every write costs one extra indexed insert, and a hot key serialises its
   duplicates on a row lock. That is the intended behaviour.
-- `idempotency_keys` grows by one row per write; an expiry job deletes rows
-  past `expires_at` (24 h). A key reused after expiry creates a new resource.
+- `idempotency_keys` grows by one row per write; the `idempotency_expiry`
+  worker deletes rows past `expires_at` (24 h) in batches with
+  `FOR UPDATE SKIP LOCKED`. For payments, a key reused after expiry is
+  rejected (decision 7); resources without their own unique key would be
+  created again.
 - The request path must never call the provider, or the transaction would
   stay open across a network call (see DESIGN rule 1).
 - Test fixtures must create the schema with Alembic, not
   `Base.metadata.create_all`, so constraints written in raw SQL exist in tests.
+
+## Results (Stage 1)
+
+- In-process, real Postgres: 1,000 concurrent requests with one key → one
+  payment, one outbox row, 1,000 identical responses, with Redis up and with
+  Redis unreachable (`tests/integration/test_idempotency.py`).
+- Two deliberately broken variants (skip the key claim; skip the fingerprint
+  check) are caught by that suite.
+- Locust, 200 users, 90 s, Redis stopped for 31 s mid-run (2-core sandbox,
+  so latency is not meaningful): 16,640 requests, 5,323 payments, 0
+  duplicates seen by clients, 0 keys with more than one payment, no HTTP 5xx;
+  3 client-side connection errors (status 0) in the concurrent-copies task.
+  Reproduce with `make load-test-redis-kill`; the README number must come
+  from a run on a real machine.
 
 ## What would change my mind
 

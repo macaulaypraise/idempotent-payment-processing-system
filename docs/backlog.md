@@ -32,23 +32,39 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 
 | # | Defect | Where | Evidence | Fixed by |
 |---|---|---|---|---|
-| D11 | **Redis down → API down.** Every `POST /payments` returns 500 because the cache read and lock raise. No duplicates are created (the unique constraint holds), but no payments are taken. | `app/services/payment_service.py` | observed: `500 500 500`, 0 rows | Stage 1 (ADR 0001) |
-| D12 | Same key with a different body silently replays the first response; no fingerprint, no 422. | `payment_service.py` | code | Stage 1 |
-| D13 | Replays after a Redis restart are rebuilt from the current row, so they can differ from the original response (status moved on). Breaks I9. | `payment_service.py` IntegrityError branch | code | Stage 1 (response stored in Postgres) |
-| D14 | Idempotency keys are global, not per tenant; no authentication. | `app/models/payment.py` | code | Stage 1 |
+| D11 | **Redis down → API down.** Every `POST /payments` returns 500 because the cache read and lock raise. No duplicates are created (the unique constraint holds), but no payments are taken. | `app/services/payment_service.py` | observed: `500 500 500`, 0 rows | ✅ fixed — Stage 1 (ADR 0001) |
+| D12 | Same key with a different body silently replays the first response; no fingerprint, no 422. | `payment_service.py` | code | ✅ fixed — Stage 1 |
+| D13 | Replays after a Redis restart are rebuilt from the current row, so they can differ from the original response (status moved on). Breaks I9. | `payment_service.py` IntegrityError branch | code | ✅ fixed — Stage 1 (response stored in Postgres) |
+| D14 | Idempotency keys are global, not per tenant; no authentication. | `app/models/payment.py` | code | ✅ fixed — Stage 1 |
 | D15 | Money is `Numeric(12,2)` in the DB and `float` in the schema, service and outbox payload. | `models/payment.py`, `schemas/payment.py`, `payment_service.py` | code | Stage 2 (`BIGINT` minor units) |
 | D16 | `version` column is never used. | `models/payment.py` | code | Stage 2 (dropped) |
 | D17 | State machine is enforced only in Python. The DB has an enum but no transition guard. `FAILED → PENDING` is allowed. | `app/services/state_machine.py`, initial migration | code | Stage 3 (DB guard; `FAILED` terminal) |
-| D18 | Test fixtures build the schema with `Base.metadata.create_all`, not Alembic, so constraints and triggers written in raw SQL in migrations would be missing in tests. | `tests/conftest.py` | code | Stage 1 (must change before any raw-SQL constraint lands) |
+| D18 | Test fixtures build the schema with `Base.metadata.create_all`, not Alembic, so constraints and triggers written in raw SQL in migrations would be missing in tests. | `tests/conftest.py` | code | ✅ fixed — Stage 1 (fixtures run Alembic) |
 
 ### Operability (fix opportunistically, by Stage 8)
 
 | # | Defect | Where | Evidence | Fixed by |
 |---|---|---|---|---|
 | D19 | Workers never call `setup_logging()`, so their logs are not JSON. | `app/workers/*` | observed | Stage 4/5 when the workers are rewritten |
-| D20 | SQLAlchemy engine created with `echo=True`: every statement and its parameters are logged, in production too. | `app/core/database.py` | observed | Stage 1 (drive from settings) |
+| D20 | SQLAlchemy engine created with `echo=True`: every statement and its parameters are logged, in production too. | `app/core/database.py` | observed | ✅ fixed — Stage 1 (drive from settings) |
 | D21 | `/health` opens a new Kafka admin client on every call (Railway polls it). | `app/routers/health.py` | code | Stage 9 (split liveness/readiness) |
 | D22 | CHANGELOG/README claims are stale: `docker-compose.test.yml` (never existed), Python 3.11, PostgreSQL 15, "Redis Sentinel" mitigation. | `CHANGELOG.md`, `README.md`, `DESIGN.md` | code | Stage 8 rewrite |
+
+## Operations
+
+- **Live Railway demo paused (2026-11-21).** The `RAILWAY_TOKEN` secret is no
+  longer valid, so Deploy fails on `main` pushes. Disable the Deploy workflow
+  in GitHub Actions until hosting is decided at Stage 8; the local
+  `make dev` stack is the primary deliverable.
+
+## Found during Stage 1 (not fixed; noted for their stage)
+
+| # | Item | Where | Stage |
+|---|---|---|---|
+| S1-1 | The API process created a Kafka producer and HTTP client at startup that it never used, so Kafka down meant the API could not start. **Removed in Stage 1.** | `app/main.py` | done |
+| S1-2 | `processed_events` PK is `(event_id, consumer_group)`; DESIGN.md says `(consumer_group, event_id)`. Same uniqueness; revisit when dedup moves to outbox ids. | initial migration | 5 |
+| S1-3 | `payments.amount` is still `Numeric(12,2)`; the API now takes `Decimal` with at most 2 places, never `float`. Minor units come in Stage 2. | `schemas/payment.py` | 2 |
+| S1-4 | Each Redis breaker trip logs one warning per in-flight request; noisy during an outage. Rate-limit the log if it matters. | `services/response_cache.py` | 9 |
 
 ## Parked ideas (not in any current stage)
 

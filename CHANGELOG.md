@@ -12,6 +12,48 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 1 — Idempotency truth in Postgres + tenants
+
+**Breaking**
+- All business routes are under `/v1` and need `Authorization: Bearer <api key>`.
+  `POST /payments` → `POST /v1/payments`; `/webhooks` → `/v1/webhooks`.
+- Missing `Idempotency-Key` is now 400 (was FastAPI's 422). Same key with a
+  different body is 422. A key still in flight past `lock_timeout` is 409
+  with `Retry-After`.
+- `amount` is validated as a decimal with at most 2 places and a 3-letter
+  upper-case currency; it is never handled as `float`.
+
+**Added**
+- `tenants` and `api_keys` (SHA-256 of the key stored; plaintext shown once).
+  `python -m app.cli create-tenant | create-api-key | revoke-api-key`, and
+  `make tenant NAME=…` / `make api-key TENANT=…`.
+- `idempotency_keys` table: fingerprint (SHA-256 of method, path, canonical
+  JSON), stored response, 24 h expiry. Written in the same transaction as the
+  payment and outbox row; the primary key is the lock for concurrent
+  duplicates. Deterministic rejections are stored via a savepoint.
+- Replays return the stored status and body plus `Idempotent-Replayed: true`.
+- `idempotency_expiry` worker (and compose service) deletes expired keys.
+- `tests/load/redis_kill.sh` / `make load-test-redis-kill`: Locust with Redis
+  stopped for the middle third of the run, then a duplicate count.
+
+**Changed**
+- Redis is a read-through cache of completed responses only: 250 ms socket
+  timeouts, errors ignored, and a 5 s breaker after a failure. The Redis
+  `SETNX` lock is removed. The API starts without Redis or Kafka.
+- `tenant_id` on `payments`, `outbox_events`, `processed_events` (backfilled
+  to a default tenant); payments unique per `(tenant_id, idempotency_key)`.
+- SQL echo is off unless `DB_ECHO=true`.
+- Test fixtures build the schema with Alembic (not `create_all`) and refuse
+  to reset a database whose name lacks "test".
+
+**Removed**
+- `tests/unit/test_payment_flow.py` (mock-based, tested the Redis lock);
+  its cases now run against real Postgres in `tests/integration`.
+
+**Measured** (details in ADR 0001): 1,000 concurrent same-key requests → 1
+payment with Redis up and down; Locust with Redis stopped 31 s → 0
+duplicates, no 5xx.
+
 ### Stage 0 — Baseline and reframe
 
 **Changed**
