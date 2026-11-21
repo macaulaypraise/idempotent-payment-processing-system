@@ -15,11 +15,19 @@ jobs:
   deploy:
     name: Deploy to Railway
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only deploy main. workflow_run fires for CI runs on every branch, so
+    # without the head_branch check v2 work-in-progress would ship to Railway.
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.event == 'push' }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Deploy the exact commit CI tested, not whatever main points to now.
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Install Railway CLI
         run: npm install -g @railway/cli
