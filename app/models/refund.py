@@ -80,6 +80,18 @@ class Refund(Base):
             name="ck_refunds_hold_source",
         ),
         Index(
+            "ix_refunds_retry_due",
+            "next_attempt_at",
+            postgresql_where=text(
+                "status = 'PROCESSING' AND next_attempt_at IS NOT NULL"
+            ),
+        ),
+        Index(
+            "ix_refunds_pending_created",
+            "created_at",
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+        Index(
             "uq_refunds_one_active_per_payment",
             "payment_id",
             unique=True,

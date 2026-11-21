@@ -154,36 +154,29 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
-      mock-payment-provider:
-        condition: service_healthy
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-  mock-payment-provider:
+      # Hostile PSP simulator (psp_sim/). Its SQLite store is the ground truth of
+  # what was really charged, kept on a volume so it survives restarts.
+  psp-sim:
     build:
-      context: ./mock_provider
+      context: .
       dockerfile: Dockerfile
-    container_name: mock-payment-provider
+      target: runtime
+    container_name: psp-sim
     restart: unless-stopped
     ports:
     - "8001:8001"
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+    command: .venv/bin/uvicorn psp_sim.main:app --host 0.0.0.0 --port 8001
+    environment:
+      PSP_SIM_DB_PATH: /data/psp_sim.db
+      PSP_SIM_RESPONSE_TIMEOUT_SECONDS: "30"
+    volumes:
+      - psp-sim-data:/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health').read()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+      test: ["CMD", ".venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   outbox_poller:
     build:
@@ -201,22 +194,40 @@ services:
       redis:
         condition: service_healthy
 
-  settlement_worker:
+  # Calls the PSP for payment.initiated and refund.created events.
+  charger:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    command: .venv/bin/python -m app.workers.settlement_worker
+    command: .venv/bin/python -m app.workers.charger
     restart: unless-stopped
     env_file: .env
+    environment:
+      PSP_BASE_URL: http://psp-sim:8001
     depends_on:
       migrate:
         condition: service_completed_successfully
       kafka:
         condition: service_healthy
-      redis:
+      psp-sim:
         condition: service_healthy
-      mock-payment-provider:
+
+  # Re-drives due retries, expired leases and PENDING rows whose event was lost.
+  sweeper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    command: .venv/bin/python -m app.workers.sweeper
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PSP_BASE_URL: http://psp-sim:8001
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      psp-sim:
         condition: service_healthy
 
   # Deletes idempotency key rows past their 24 h expiry.
@@ -240,6 +251,8 @@ volumes:
   grafana-data:
     driver: local
   prometheus-data:
+    driver: local
+  psp-sim-data:
     driver: local
 
 

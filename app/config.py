@@ -31,8 +31,23 @@ class Settings(BaseSettings):
     KAFKA_SASL_USERNAME: str = ""
     KAFKA_SASL_PASSWORD: str = ""
 
-    # Mock Payment Provider
-    PAYMENT_PROVIDER_URL: str = "http://localhost:8001"
+    # Payment provider (the PSP simulator locally). Replaces v1's
+    # PAYMENT_PROVIDER_URL, which is no longer read.
+    PSP_BASE_URL: str = "http://localhost:8001"
+    PSP_TIMEOUT_SECONDS: float = 3.0  # a timeout means "unknown", never "failed"
+    # Charger leases: a claimed payment is retried once this passes, so it must
+    # comfortably exceed PSP_TIMEOUT_SECONDS.
+    PSP_LEASE_SECONDS: float = 30.0
+    PSP_MAX_ATTEMPTS: int = 6  # then a dlq.v1 event; the payment stays PROCESSING
+    PSP_RETRY_BASE_SECONDS: float = 2.0  # exponential backoff with jitter
+    PSP_RETRY_MAX_SECONDS: float = 300.0
+    SWEEPER_INTERVAL_SECONDS: float = 5.0
+    SWEEPER_BATCH_SIZE: int = 50
+    # PENDING this long means the payment.initiated event was lost
+    SWEEPER_PENDING_AFTER_SECONDS: float = 60.0
+    # Crash points for testing, e.g. "charger.after_provider_call=exit".
+    # Ignored when APP_ENV=production.
+    FAILPOINTS: str = ""
 
     # Idempotency (Postgres is the source of truth; Redis only caches)
     IDEMPOTENCY_TTL_SECONDS: int = 86400  # key rows expire after 24 hours
@@ -45,8 +60,6 @@ class Settings(BaseSettings):
     REDIS_BREAKER_COOLDOWN_SECONDS: float = 5.0
     IDEMPOTENCY_EXPIRY_INTERVAL_SECONDS: int = 60
     IDEMPOTENCY_EXPIRY_BATCH_SIZE: int = 1000
-
-    PAYMENT_MAX_RETRIES: int = 3  # Default 3 retries
 
 
 @lru_cache

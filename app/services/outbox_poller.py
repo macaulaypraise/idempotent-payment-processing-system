@@ -31,8 +31,16 @@ async def poll_and_publish(
     count = 0
     for event in events:
         try:
+            # The outbox id travels as a header so consumers can deduplicate on
+            # it. Kafka offsets are not identities: they restart when a topic
+            # is recreated (backlog D8).
             await kafka_producer.send_and_wait(
-                event.event_type, json.dumps(event.payload).encode("utf-8")
+                event.event_type,
+                json.dumps(event.payload).encode("utf-8"),
+                headers=[
+                    ("event_id", str(event.id).encode()),
+                    ("event_type", event.event_type.encode()),
+                ],
             )
             event.published_at = datetime.now(UTC)
             count += 1

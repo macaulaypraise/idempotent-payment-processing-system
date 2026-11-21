@@ -1,4 +1,5 @@
 import ssl
+from collections.abc import Sequence
 from typing import Any
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
@@ -36,11 +37,15 @@ async def close_kafka_producer(producer: AIOKafkaProducer) -> None:
     await producer.stop()
 
 
-async def create_kafka_consumer(topic: str, group_id: str) -> AIOKafkaConsumer:
+async def create_kafka_consumer(
+    topics: str | Sequence[str], group_id: str, *, auto_commit: bool = True
+) -> AIOKafkaConsumer:
+    names = [topics] if isinstance(topics, str) else list(topics)
     consumer = AIOKafkaConsumer(
-        topic,
+        *names,
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
         group_id=group_id,
+        enable_auto_commit=auto_commit,
         value_deserializer=lambda v: v.decode("utf-8"),
         **_kafka_ssl_kwargs(),
     )

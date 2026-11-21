@@ -15,6 +15,7 @@ ascending id (inside post_transfer).
 import enum
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
 import structlog
 from sqlalchemy import select
@@ -194,7 +195,7 @@ def _record(source: str, kind: enum.StrEnum, applied: Applied) -> Applied:
     return applied
 
 
-async def _lock_refund(
+async def lock_refund(
     db: AsyncSession, *, tenant_id: uuid.UUID, refund_id: uuid.UUID
 ) -> tuple[Payment, Refund]:
     payment_id = (
@@ -237,14 +238,22 @@ def _refund_event(refund: Refund, event_type: str, **extra: object) -> OutboxEve
 
 
 async def start_refund_processing(
-    db: AsyncSession, *, tenant_id: uuid.UUID, refund_id: uuid.UUID
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    refund_id: uuid.UUID,
+    lease_until: datetime | None = None,
 ) -> Applied:
-    """PENDING -> PROCESSING, committed before the provider is called."""
-    _, refund = await _lock_refund(db, tenant_id=tenant_id, refund_id=refund_id)
+    """PENDING -> PROCESSING, committed before the provider is called.
+
+    `lease_until` is when the sweeper may retry if this attempt never reports.
+    """
+    _, refund = await lock_refund(db, tenant_id=tenant_id, refund_id=refund_id)
     if refund.status is not RefundStatus.PENDING:
         return Applied.ALREADY_APPLIED
     refund.status = RefundStatus.PROCESSING
     refund.attempts += 1
+    refund.next_attempt_at = lease_until
     await db.flush()
     return Applied.APPLIED
 
@@ -259,7 +268,7 @@ async def apply_refund_result(
 ) -> Applied:
     """Confirm (refunds_payable -> psp_clearing, payment REFUNDED) or fail
     (hold returned to the wallet account the money belongs in now)."""
-    payment, refund = await _lock_refund(db, tenant_id=tenant_id, refund_id=refund_id)
+    payment, refund = await lock_refund(db, tenant_id=tenant_id, refund_id=refund_id)
     target = (
         RefundStatus.SUCCEEDED
         if outcome.kind is RefundOutcomeKind.SUCCEEDED

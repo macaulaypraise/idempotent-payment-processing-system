@@ -65,7 +65,8 @@ def test_settings_has_default_for_max_retries() -> None:
     from app.config import Settings
 
     s = Settings()
-    assert s.PAYMENT_MAX_RETRIES > 0
+    assert s.PSP_MAX_ATTEMPTS > 0
+    assert s.PSP_LEASE_SECONDS > s.PSP_TIMEOUT_SECONDS
 
 
 # get_settings() returns the same instance (lru_cache singleton)
@@ -92,7 +93,7 @@ def test_required_settings_fields_exist() -> None:
         "REDIS_URL",
         "KAFKA_BOOTSTRAP_SERVERS",
         "IDEMPOTENCY_TTL_SECONDS",
-        "PAYMENT_MAX_RETRIES",
+        "PSP_MAX_ATTEMPTS",
     ]
     for field in required:
         assert field in fields, f"Missing required setting: {field}"

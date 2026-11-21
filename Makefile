@@ -42,8 +42,8 @@ logs: ## Tail logs from all services
 logs-app: ## Tail API logs only
 	docker compose logs -f api
 
-logs-worker: ## Tail outbox poller + settlement worker logs
-	docker compose logs -f outbox_poller settlement_worker
+logs-worker: ## Tail outbox poller, charger and sweeper logs
+	docker compose logs -f outbox_poller charger sweeper
 
 shell: ## Open Python shell inside the running API container
 	docker compose exec api .venv/bin/python

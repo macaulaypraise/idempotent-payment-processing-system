@@ -47,3 +47,9 @@ psp_results_total = Counter(
     "Provider outcomes applied to payments and refunds",
     ["source", "outcome", "result"],
 )
+
+# Charger attempts: kind = payment | refund; result = captured | declined |
+# refunded | refund_failed | retry_scheduled | dead_lettered | conflict
+charger_attempts_total = Counter(
+    "charger_attempts_total", "Provider calls made by the charger", ["kind", "result"]
+)

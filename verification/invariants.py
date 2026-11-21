@@ -6,11 +6,14 @@ tests that share a database can check only their own data. I2 is global by
 nature; with a tenant it checks that tenant's slice of the ledger.
 
 Implemented: I1, I2, I5, I6 (Stage 2); I4 for payments and refunds
-(Stage 3). I3, I7-I10 arrive with the stages that create the data they check.
+(Stage 3); I3 (Stage 4, needs the PSP simulator's ground truth). I7-I10
+arrive with the stages that create the data they check.
 """
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections import Counter
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -202,6 +205,44 @@ async def i4_refund_postings(
     return violations
 
 
+async def i3_one_payment_per_key(
+    db: AsyncSession, tenant_id: uuid.UUID | None = None
+) -> list[str]:
+    """I3 (database half): at most one payment per (tenant, idempotency key).
+    The unique constraint makes this impossible to break; the check proves the
+    constraint is still there."""
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT p.tenant_id, p.idempotency_key, count(*) AS n
+                FROM payments p
+                WHERE true {_tenant_filter("p", tenant_id)}
+                GROUP BY p.tenant_id, p.idempotency_key
+                HAVING count(*) > 1
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+    ).all()
+    return [
+        f"I3 {r.n} payments for key {r.idempotency_key!r} (tenant {r.tenant_id})"
+        for r in rows
+    ]
+
+
+def i3_one_charge_per_payment(charges: Iterable[Mapping[str, Any]]) -> list[str]:
+    """I3 (provider half): at most one provider charge per payment, from the
+    PSP simulator's ground truth (charges carry the payment id as
+    merchant_reference)."""
+    counts = Counter(str(c["merchant_reference"]) for c in charges)
+    return [
+        f"I3 payment {reference} was charged {n} times at the provider"
+        for reference, n in counts.items()
+        if n > 1
+    ]
+
+
 LEDGER_INVARIANTS: tuple[Check, ...] = (
     i1_transfers_balance,
     i2_ledger_balances,
@@ -209,6 +250,7 @@ LEDGER_INVARIANTS: tuple[Check, ...] = (
     i6_guarded_accounts_not_negative,
     i4_payment_captures,
     i4_refund_postings,
+    i3_one_payment_per_key,
 )
 
 

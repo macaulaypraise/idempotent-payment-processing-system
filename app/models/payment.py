@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import mapped_column
 
@@ -90,4 +91,18 @@ class Payment(Base):
             "tenant_id", "idempotency_key", name="uq_payments_tenant_idempotency_key"
         ),
         Index("ix_payments_wallet_id", "wallet_id"),
+        # Sweeper lookups (migration e6c1a9d4b582)
+        Index(
+            "ix_payments_retry_due",
+            "next_attempt_at",
+            postgresql_where=text(
+                "status = 'PROCESSING' AND wallet_id IS NOT NULL "
+                "AND next_attempt_at IS NOT NULL"
+            ),
+        ),
+        Index(
+            "ix_payments_pending_created",
+            "created_at",
+            postgresql_where=text("status = 'PENDING' AND wallet_id IS NOT NULL"),
+        ),
     )
