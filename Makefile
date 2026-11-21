@@ -4,8 +4,10 @@
 # Usage: make <target>
 # =============================================================================
 
-.PHONY: help dev down logs shell test test-unit test-integration \
-        migrate check-infra load-test metrics clean
+.PHONY: help dev down logs logs-app logs-worker shell test test-unit \
+        test-integration test-cov migrate migrate-down migrate-status \
+        check-infra load-test load-test-ui lint lint-fix typecheck fmt \
+        clean clean-cache verify verify-quick verify-faults bench recon demo
 
 # Default target — print available commands
 help:
@@ -36,27 +38,27 @@ down: ## Stop and remove all containers (keeps volumes)
 logs: ## Tail logs from all services
 	docker compose logs -f
 
-logs-app: ## Tail app logs only
-	docker compose logs -f app
+logs-app: ## Tail API logs only
+	docker compose logs -f api
 
 logs-worker: ## Tail outbox poller + settlement worker logs
 	docker compose logs -f outbox_poller settlement_worker
 
-shell: ## Open Python shell inside the running app container
-	docker compose exec app python
+shell: ## Open Python shell inside the running API container
+	docker compose exec api .venv/bin/python
 
 # -----------------------------------------------------------------------------
 # Database
 # -----------------------------------------------------------------------------
 
 migrate: ## Apply all pending Alembic migrations
-	docker compose exec app alembic upgrade head
+	docker compose exec api .venv/bin/alembic upgrade head
 
 migrate-down: ## Roll back the last migration
-	docker compose exec app alembic downgrade -1
+	docker compose exec api .venv/bin/alembic downgrade -1
 
 migrate-status: ## Show current migration version
-	docker compose exec app alembic current
+	docker compose exec api .venv/bin/alembic current
 
 # -----------------------------------------------------------------------------
 # Infrastructure checks
@@ -66,9 +68,9 @@ check-infra: ## Verify all infrastructure services are healthy
 	@echo "Checking Redis..."
 	@docker compose exec redis redis-cli ping
 	@echo "Checking PostgreSQL..."
-	@docker compose exec postgres psql -U postgres -c "SELECT 1" -q -t
+	@docker compose exec postgres sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "SELECT 1" -q -t'
 	@echo "Checking Kafka..."
-	@docker compose exec kafka kafka-topics.sh --list --bootstrap-server localhost:9092
+	@docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
 	@echo "Checking Prometheus..."
 	@curl -sf http://localhost:9090/-/healthy && echo "Prometheus OK"
 	@echo ""
@@ -78,9 +80,8 @@ check-infra: ## Verify all infrastructure services are healthy
 # Testing
 # -----------------------------------------------------------------------------
 
-test: ## Run full test suite (unit + integration) inside Docker
-	docker compose -f docker-compose.test.yml run --rm app \
-		pytest tests/ -v --tb=short \
+test: ## Run full suite (unit + integration) as CI does; needs Postgres + Redis (see .env.test.example)
+	poetry run pytest tests/ -v --tb=short \
 		--cov=app --cov-report=term-missing --cov-fail-under=80
 
 test-unit: ## Run unit tests only — fast, no Docker services needed
@@ -124,10 +125,33 @@ lint-fix: ## Run ruff and auto-fix issues
 	poetry run ruff check . --fix
 
 typecheck: ## Run mypy type checker
-	poetry run mypy app/
+	poetry run mypy .
 
 fmt: ## Format code with ruff formatter
 	poetry run ruff format .
+
+# -----------------------------------------------------------------------------
+# v2 placeholders — implemented in the stage noted. They fail on purpose so
+# nothing can report a green "verify" before the harness exists.
+# -----------------------------------------------------------------------------
+
+verify: ## [Stage 7] Full verification run: state machine + fault scenarios + checker
+	@echo "make verify: not implemented yet (Stage 7)"; exit 1
+
+verify-quick: ## [Stage 7] Short deterministic verification profile (PR CI)
+	@echo "make verify-quick: not implemented yet (Stage 7)"; exit 1
+
+verify-faults: ## [Stage 7] Toxiproxy fault-injection scenarios
+	@echo "make verify-faults: not implemented yet (Stage 7)"; exit 1
+
+bench: ## [Stage 8] Headless Locust benchmark with CSV output
+	@echo "make bench: not implemented yet (Stage 8)"; exit 1
+
+recon: ## [Stage 6] Run reconciliation for a date
+	@echo "make recon: not implemented yet (Stage 6)"; exit 1
+
+demo: ## [Stage 8] Scripted three-minute demo
+	@echo "make demo: not implemented yet (Stage 8)"; exit 1
 
 # -----------------------------------------------------------------------------
 # Cleanup

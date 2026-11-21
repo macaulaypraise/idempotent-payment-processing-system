@@ -43,3 +43,7 @@ extensions.txt
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Windows/WSL download markers
+*:Zone.Identifier
+*Zone.Identifier
