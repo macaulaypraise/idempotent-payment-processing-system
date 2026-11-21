@@ -28,3 +28,15 @@ outbox_lag_seconds = Gauge(
 
 # dlq_depth tracks how many events are in the dead letter queue
 dlq_depth = Gauge("dlq_depth", "Number of events currently in the dead letter queue")
+
+# Every idempotent write route: route = "payments" | "wallets" | "transfers";
+# outcome = created | replayed_db | replayed_cache | rejected | mismatch | conflict
+idempotent_requests_total = Counter(
+    "idempotent_requests_total",
+    "Idempotent write requests by route and outcome",
+    ["route", "outcome"],
+)
+
+ledger_transfers_total = Counter(
+    "ledger_transfers_total", "Ledger transfers posted", ["kind"]
+)

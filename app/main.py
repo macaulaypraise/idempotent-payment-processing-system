@@ -8,7 +8,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from app.config import get_settings
 from app.core.logging import setup_logging
 from app.core.redis_client import close_redis_client, create_redis_client
-from app.routers import health, payments, webhooks
+from app.routers import health, payments, wallets, webhooks
 from app.services.response_cache import ResponseCache
 
 
@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(title="IPPS / Ledgerline", version="2.0.0-dev", lifespan=lifespan)
 
 app.include_router(payments.router, tags=["payments"])
+app.include_router(wallets.router, tags=["wallets"])
 app.include_router(webhooks.router, tags=["webhooks"])
 app.include_router(health.router, tags=["health"])
 

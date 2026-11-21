@@ -7,7 +7,6 @@ Note: test_invalid_state_transition_raises is a pure unit test — it lives
 here for discoverability but requires no real infrastructure.
 """
 
-from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -32,7 +31,7 @@ async def create_payment(
         db,
         tenant_id=DEFAULT_TENANT_ID,
         idempotency_key=key,
-        amount=Decimal(str(amount)),
+        amount=round(amount * 100),  # tests pass major units for readability
         currency=currency,
     )
     await db.commit()
@@ -122,7 +121,7 @@ async def test_payment_row_persisted_correctly(
     payment = result.scalar_one()
 
     assert str(payment.id) == response["payment_id"]
-    assert float(payment.amount) == 99.99
+    assert payment.amount == 9999  # minor units
     assert payment.currency == "USD"
     assert payment.status == PaymentStatus.PENDING
 

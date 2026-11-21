@@ -20,23 +20,27 @@ from app.dependencies import (
     get_settings_dep,
     require_idempotency_key,
 )
+from app.routers.idempotent import IDEMPOTENT_ERRORS, idempotent_response
 from app.schemas.payment import PaymentRequest, PaymentResponse
-from app.services.idempotency import ReplaySource, execute_idempotent, fingerprint
 from app.services.payment_service import create_payment, get_payment, payment_body
 from app.services.response_cache import ResponseCache
 
 router = APIRouter(prefix="/v1")
 
-_ERRORS: dict[int | str, dict[str, Any]] = {
-    400: {"description": "Idempotency-Key header missing or too long"},
-    401: {"description": "Missing or invalid API key"},
-    409: {"description": "Original request with this key still in progress"},
-    422: {"description": "Invalid body, or key reused with a different body"},
+# v1 metric labels, kept so existing dashboards keep working.
+_V1_LABEL = {
+    "created": "success",
+    "replayed_db": "idempotent_hit",
+    "replayed_cache": "cache_hit",
+    "rejected": "rejected",
 }
 
 
 @router.post(
-    "/payments", response_model=PaymentResponse, status_code=202, responses=_ERRORS
+    "/payments",
+    response_model=PaymentResponse,
+    status_code=202,
+    responses=IDEMPOTENT_ERRORS,
 )
 async def create_payment_route(
     request: Request,
@@ -48,16 +52,16 @@ async def create_payment_route(
     clock: Clock = Depends(get_clock),
     settings: Settings = Depends(get_settings_dep),
 ) -> JSONResponse:
-    request_fingerprint = fingerprint(
-        request.method, request.url.path, await request.json()
-    )
     try:
-        result = await execute_idempotent(
-            db,
-            cache,
+        response, outcome = await idempotent_response(
+            route="payments",
+            request=request,
+            db=db,
+            cache=cache,
+            clock=clock,
+            settings=settings,
             tenant_id=tenant_id,
             key=idempotency_key,
-            request_fingerprint=request_fingerprint,
             handler=lambda: create_payment(
                 db,
                 tenant_id=tenant_id,
@@ -65,9 +69,6 @@ async def create_payment_route(
                 amount=payload.amount,
                 currency=payload.currency,
             ),
-            clock=clock,
-            ttl_seconds=settings.IDEMPOTENCY_TTL_SECONDS,
-            lock_timeout_ms=settings.IDEMPOTENCY_LOCK_TIMEOUT_MS,
         )
     except IdempotencyKeyMismatchError:
         payments_created_total.labels(status="mismatch").inc()
@@ -75,22 +76,8 @@ async def create_payment_route(
     except IdempotencyConflictError:
         payments_created_total.labels(status="conflict").inc()
         raise
-
-    if result.source is ReplaySource.CACHE:
-        payments_created_total.labels(status="cache_hit").inc()
-    elif result.source is ReplaySource.DATABASE:
-        payments_created_total.labels(status="idempotent_hit").inc()
-    elif result.response.status_code >= 400:
-        payments_created_total.labels(status="rejected").inc()
-    else:
-        payments_created_total.labels(status="success").inc()
-
-    headers = {"Idempotent-Replayed": "true"} if result.replayed else None
-    return JSONResponse(
-        status_code=result.response.status_code,
-        content=result.response.body,
-        headers=headers,
-    )
+    payments_created_total.labels(status=_V1_LABEL[outcome]).inc()
+    return response
 
 
 @router.get("/payments/{payment_id}", response_model=PaymentResponse)

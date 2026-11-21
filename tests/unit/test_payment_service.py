@@ -3,7 +3,6 @@ Unit tests for app/services/payment_service.py (database mocked).
 """
 
 import uuid
-from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,7 +27,7 @@ async def _create(db: AsyncMock) -> object:
         db,
         tenant_id=TENANT,
         idempotency_key="k1",
-        amount=Decimal("50.5"),
+        amount=5050,
         currency="USD",
     )
 
@@ -49,7 +48,8 @@ async def test_create_payment_writes_payment_and_outbox_for_tenant() -> None:
 
     assert result.status_code == 202  # type: ignore[attr-defined]
     assert result.resource_id == payment.id  # type: ignore[attr-defined]
-    assert result.body["amount"] == "50.50"  # type: ignore[attr-defined]
+    assert result.body["amount"] == 5050  # type: ignore[attr-defined]
+    assert event.payload["amount"] == 5050
     db.flush.assert_awaited_once()
     db.commit.assert_not_awaited()  # the idempotency layer owns the transaction
 
@@ -74,18 +74,18 @@ async def test_other_integrity_errors_propagate() -> None:
         await _create(db)
 
 
-def test_payment_body_formats_amount_with_two_places() -> None:
+def test_payment_body_reports_minor_units() -> None:
     payment = Payment(
         id=uuid.uuid4(),
         tenant_id=TENANT,
         idempotency_key="k",
-        amount=Decimal("7"),
+        amount=700,
         currency="NGN",
         status=PaymentStatus.SETTLED,
     )
     assert payment_body(payment) == {
         "payment_id": str(payment.id),
         "status": "settled",
-        "amount": "7.00",
+        "amount": 700,
         "currency": "NGN",
     }

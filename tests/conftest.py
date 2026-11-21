@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 load_dotenv(".env.test")
@@ -24,11 +25,25 @@ TEST_REDIS_URL: str = os.environ.get("TEST_REDIS_URL", "")
 UNREACHABLE_REDIS_URL = "redis://127.0.0.1:1/0"
 
 DEFAULT_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+# The app runs as a restricted role, as in production. A separate name from
+# the dev stack's role keeps the two from overwriting each other's password.
+TEST_APP_ROLE = "ipps_app_test"
+TEST_APP_PASSWORD = "ipps_app_test"
 _CLEAN_SQL = (
-    "TRUNCATE TABLE idempotency_keys, api_keys, outbox_events, processed_events, "
-    "payments RESTART IDENTITY CASCADE",
+    # Ledger tables are append-only even for the owner; replica mode skips the
+    # immutability triggers so tests can start clean (owner is a superuser in
+    # docker-compose and CI).
+    "SET session_replication_role = replica",
+    "TRUNCATE TABLE entries, transfers, wallets, accounts, idempotency_keys, "
+    "api_keys, outbox_events, processed_events, payments RESTART IDENTITY CASCADE",
     f"DELETE FROM tenants WHERE id <> '{DEFAULT_TENANT_ID}'",
+    "SET session_replication_role = DEFAULT",
 )
+
+
+def app_role_url(owner_url: str) -> str:
+    url = make_url(owner_url).set(username=TEST_APP_ROLE, password=TEST_APP_PASSWORD)
+    return url.render_as_string(hide_password=False)
 
 
 async def _reset_schema(url: str) -> None:
@@ -39,12 +54,21 @@ async def _reset_schema(url: str) -> None:
     await engine.dispose()
 
 
-@pytest.fixture(scope="session")
-def migrated_database() -> str:
-    """Build the test schema with Alembic, exactly as production does.
+async def _configure_role(owner_url: str) -> None:
+    from app.cli import configure_app_role
 
-    Constraints and triggers written as raw SQL in migrations (Stage 2 on)
-    exist only this way; Base.metadata.create_all would silently skip them.
+    engine = create_async_engine(owner_url)
+    async with engine.begin() as conn:
+        await configure_app_role(conn, TEST_APP_ROLE, TEST_APP_PASSWORD)
+    await engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def owner_database_url() -> str:
+    """Build the test schema with Alembic, as the owner, exactly as production.
+
+    Constraints and triggers written as raw SQL in migrations exist only this
+    way; Base.metadata.create_all would silently skip them.
     """
     if not TEST_DATABASE_URL:
         pytest.skip("TEST_DATABASE_URL not set")
@@ -55,20 +79,40 @@ def migrated_database() -> str:
     asyncio.run(_reset_schema(TEST_DATABASE_URL))
     cfg = Config("alembic.ini")
     cfg.attributes["database_url"] = TEST_DATABASE_URL
+    cfg.attributes["app_role"] = TEST_APP_ROLE
     command.upgrade(cfg, "head")
+    asyncio.run(_configure_role(TEST_DATABASE_URL))
     return TEST_DATABASE_URL
+
+
+@pytest.fixture(scope="session")
+def migrated_database(owner_database_url: str) -> str:
+    """URL for the restricted application role."""
+    return app_role_url(owner_database_url)
+
+
+@pytest_asyncio.fixture
+async def owner_session_factory(
+    owner_database_url: str,
+) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    engine = create_async_engine(owner_database_url, echo=False)
+    yield async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    await engine.dispose()
 
 
 @pytest_asyncio.fixture
 async def session_factory(
-    migrated_database: str,
+    migrated_database: str, owner_database_url: str
 ) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    owner = create_async_engine(owner_database_url)
+    async with owner.begin() as conn:
+        for statement in _CLEAN_SQL:
+            await conn.execute(text(statement))
+    await owner.dispose()
+
     engine = create_async_engine(
         migrated_database, echo=False, pool_size=10, max_overflow=10
     )
-    async with engine.begin() as conn:
-        for statement in _CLEAN_SQL:
-            await conn.execute(text(statement))
     yield async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     await engine.dispose()
 

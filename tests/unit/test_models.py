@@ -19,7 +19,6 @@ def test_payment_model_has_required_columns() -> None:
         "currency",
         "created_at",
         "updated_at",
-        "version",
     }
     for col in required:
         assert col in col_names, f"Payment missing column: {col}"
@@ -52,14 +51,14 @@ def test_processed_event_model_has_required_columns() -> None:
         assert col in col_names, f"ProcessedEvent missing column: {col}"
 
 
-def test_payment_version_column_has_default() -> None:
+def test_payment_amount_is_integer_minor_units_and_version_is_gone() -> None:
+    from sqlalchemy import BigInteger
+
     from app.models.payment import Payment
 
     cols = {c.key: c for c in Payment.__mapper__.columns}
-    version_col = cols.get("version")
-    assert version_col is not None
-    # version should default to 1 or 0 (optimistic lock starting value)
-    assert version_col.default is not None or version_col.server_default is not None
+    assert isinstance(cols["amount"].type, BigInteger)
+    assert "version" not in cols
 
 
 def test_payment_status_is_string_or_enum() -> None:

@@ -34,10 +34,15 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    """Programmatic callers (the test suite) pass the URL explicitly;
-    the CLI uses DATABASE_URL from the environment."""
+    """Migrations run as the schema owner.
+
+    Programmatic callers (the test suite) pass the URL explicitly; the CLI
+    uses MIGRATION_DATABASE_URL, falling back to DATABASE_URL.
+    """
     url = config.attributes.get("database_url")
-    return str(url) if url else settings.DATABASE_URL
+    if url:
+        return str(url)
+    return settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL
 
 
 def run_migrations_offline() -> None:

@@ -4,11 +4,11 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     UUID,
+    BigInteger,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
-    Integer,
-    Numeric,
     String,
     UniqueConstraint,
 )
@@ -36,9 +36,8 @@ class Payment(Base):
     # idempotency_keys: even a bug in the idempotency flow cannot create two
     # payments for one key.
     idempotency_key = mapped_column(String, nullable=False)
-    amount = mapped_column(Numeric(precision=12, scale=2), nullable=False)
+    amount = mapped_column(BigInteger, nullable=False)  # minor units (cents, kobo)
     currency = mapped_column(String(3), nullable=False)
-    version = mapped_column(Integer, nullable=False, default=1)
     status = mapped_column(
         Enum(PaymentStatus), nullable=False, default=PaymentStatus.PENDING
     )
@@ -53,6 +52,7 @@ class Payment(Base):
     )
 
     __table_args__ = (
+        CheckConstraint("amount > 0", name="ck_payments_amount_positive"),
         UniqueConstraint(
             "tenant_id", "idempotency_key", name="uq_payments_tenant_idempotency_key"
         ),

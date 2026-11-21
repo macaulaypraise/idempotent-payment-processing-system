@@ -6,7 +6,6 @@ HTTP behaviour against a real database is in tests/integration.
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,7 +19,7 @@ from app.services.idempotency import IdempotentResult, ReplaySource
 from app.services.response_cache import StoredResponse
 
 TENANT = uuid.uuid4()
-BODY = {"amount": 50.00, "currency": "USD"}
+BODY = {"amount": 5000, "currency": "USD"}
 AUTH = {"Authorization": "Bearer ipps_test"}
 
 
@@ -71,7 +70,7 @@ async def test_create_payment_returns_stored_status_and_body(
     client: AsyncClient,
 ) -> None:
     with patch(
-        "app.routers.payments.execute_idempotent",
+        "app.routers.idempotent.execute_idempotent",
         new=AsyncMock(return_value=_result(ReplaySource.NONE)),
     ):
         resp = await _post(client)
@@ -84,7 +83,7 @@ async def test_create_payment_returns_stored_status_and_body(
 @pytest.mark.parametrize("source", [ReplaySource.DATABASE, ReplaySource.CACHE])
 async def test_replay_sets_header(client: AsyncClient, source: ReplaySource) -> None:
     with patch(
-        "app.routers.payments.execute_idempotent",
+        "app.routers.idempotent.execute_idempotent",
         new=AsyncMock(return_value=_result(source)),
     ):
         resp = await _post(client)
@@ -94,7 +93,7 @@ async def test_replay_sets_header(client: AsyncClient, source: ReplaySource) -> 
 @pytest.mark.asyncio
 async def test_stored_rejection_is_returned_verbatim(client: AsyncClient) -> None:
     with patch(
-        "app.routers.payments.execute_idempotent",
+        "app.routers.idempotent.execute_idempotent",
         new=AsyncMock(return_value=_result(ReplaySource.NONE, status=422)),
     ):
         resp = await _post(client)
@@ -118,11 +117,13 @@ async def test_blank_idempotency_key_returns_400(client: AsyncClient) -> None:
     "body",
     [
         {"currency": "USD"},
-        {"amount": -10.00, "currency": "USD"},
+        {"amount": -1000, "currency": "USD"},
         {"amount": 0, "currency": "USD"},
-        {"amount": 10.001, "currency": "USD"},
-        {"amount": 10.00, "currency": "usd"},
-        {"amount": 10.00, "currency": "US"},
+        {"amount": 10.5, "currency": "USD"},  # floats are rejected outright
+        {"amount": "1000", "currency": "USD"},  # strict: no string coercion
+        {"amount": 10**15 + 1, "currency": "USD"},
+        {"amount": 1000, "currency": "usd"},
+        {"amount": 1000, "currency": "US"},
     ],
 )
 async def test_invalid_body_returns_422(client: AsyncClient, body: Any) -> None:
@@ -133,7 +134,7 @@ async def test_invalid_body_returns_422(client: AsyncClient, body: Any) -> None:
 @pytest.mark.asyncio
 async def test_conflict_returns_409_with_retry_after(client: AsyncClient) -> None:
     with patch(
-        "app.routers.payments.execute_idempotent",
+        "app.routers.idempotent.execute_idempotent",
         new=AsyncMock(side_effect=IdempotencyConflictError()),
     ):
         resp = await _post(client)
@@ -144,7 +145,7 @@ async def test_conflict_returns_409_with_retry_after(client: AsyncClient) -> Non
 @pytest.mark.asyncio
 async def test_mismatch_returns_422(client: AsyncClient) -> None:
     with patch(
-        "app.routers.payments.execute_idempotent",
+        "app.routers.idempotent.execute_idempotent",
         new=AsyncMock(side_effect=IdempotencyKeyMismatchError()),
     ):
         resp = await _post(client)
@@ -180,7 +181,7 @@ async def test_get_payment_returns_200(client: AsyncClient) -> None:
         id=uuid.uuid4(),
         tenant_id=TENANT,
         idempotency_key="k",
-        amount=Decimal("50.00"),
+        amount=5000,
         currency="USD",
         status=PaymentStatus.SETTLED,
         created_at=datetime.now(UTC),

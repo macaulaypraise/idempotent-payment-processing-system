@@ -13,8 +13,12 @@ class Settings(BaseSettings):
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
 
-    # Database
+    # Database. The app connects as a restricted role (APP_DB_ROLE) that
+    # cannot update or delete ledger rows; migrations connect as the owner.
     DATABASE_URL: str
+    MIGRATION_DATABASE_URL: str | None = None  # owner; falls back to DATABASE_URL
+    APP_DB_ROLE: str = "ipps_app"
+    APP_DB_PASSWORD: str | None = None  # set by `python -m app.cli configure-app-role`
     DB_ECHO: bool = False  # log every SQL statement; never enable in production
 
     # Redis

@@ -28,7 +28,7 @@ from tests.conftest import TEST_REDIS_URL, UNREACHABLE_REDIS_URL
 pytestmark = pytest.mark.asyncio
 
 CONCURRENCY = int(os.environ.get("IPPS_CONCURRENCY", "1000"))
-BODY = {"amount": 100.00, "currency": "USD"}
+BODY = {"amount": 10_000, "currency": "USD"}
 REDIS_STATES = pytest.mark.parametrize(
     "redis_url", [TEST_REDIS_URL, UNREACHABLE_REDIS_URL], ids=["redis-up", "redis-down"]
 )
@@ -108,7 +108,7 @@ async def test_same_key_different_body_returns_422(
     creds = await make_tenant()
     async with api_client(redis_url=redis_url) as client:
         ok = await client.post("/v1/payments", json=BODY, headers=_headers(creds, "k2"))
-        changed = {"amount": 999.00, "currency": "USD"}
+        changed = {"amount": 99_900, "currency": "USD"}
         bad = await client.post(
             "/v1/payments", json=changed, headers=_headers(creds, "k2")
         )
@@ -127,11 +127,11 @@ async def test_fingerprint_ignores_key_order_and_whitespace(
     async with api_client() as client:
         a = await client.post(
             "/v1/payments",
-            content='{"amount": 5.00, "currency": "EUR"}',
+            content='{"amount": 500, "currency": "EUR"}',
             headers=headers,
         )
         b = await client.post(
-            "/v1/payments", content='{ "currency":"EUR","amount":5.0 }', headers=headers
+            "/v1/payments", content='{ "currency":"EUR","amount":500 }', headers=headers
         )
     assert a.status_code == b.status_code == 202
     assert a.json() == b.json()
@@ -145,7 +145,7 @@ async def test_mismatch_detected_on_cache_hit(
         await client.post("/v1/payments", json=BODY, headers=_headers(creds, "k-cache"))
         bad = await client.post(
             "/v1/payments",
-            json={"amount": 1.00, "currency": "USD"},
+            json={"amount": 100, "currency": "USD"},
             headers=_headers(creds, "k-cache"),
         )
     assert bad.status_code == 422

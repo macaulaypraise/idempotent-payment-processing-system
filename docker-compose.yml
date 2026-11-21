@@ -126,7 +126,11 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    command: .venv/bin/alembic upgrade head
+    # Runs as the owner (MIGRATION_DATABASE_URL), then gives the restricted
+    # app role (APP_DB_ROLE / APP_DB_PASSWORD) its login.
+    command: >-
+      sh -c ".venv/bin/alembic upgrade head &&
+             .venv/bin/python -m app.cli configure-app-role"
     env_file: .env
     restart: "no"
     depends_on:

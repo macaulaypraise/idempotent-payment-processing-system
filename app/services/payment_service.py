@@ -1,5 +1,4 @@
 import uuid
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -11,14 +10,12 @@ from app.models.outbox_event import OutboxEvent
 from app.models.payment import Payment, PaymentStatus
 from app.services.idempotency import BusinessRejection, HandlerResult
 
-_TWO_PLACES = Decimal("0.01")
-
 
 def payment_body(payment: Payment) -> dict[str, Any]:
     return {
         "payment_id": str(payment.id),
         "status": payment.status.value,
-        "amount": str(Decimal(payment.amount).quantize(_TWO_PLACES)),
+        "amount": payment.amount,
         "currency": payment.currency,
     }
 
@@ -28,7 +25,7 @@ async def create_payment(
     *,
     tenant_id: uuid.UUID,
     idempotency_key: str,
-    amount: Decimal,
+    amount: int,
     currency: str,
 ) -> HandlerResult:
     """Business write for POST /v1/payments: the payment row and its outbox
@@ -40,7 +37,6 @@ async def create_payment(
         amount=amount,
         currency=currency,
         status=PaymentStatus.PENDING,
-        version=1,
     )
     db.add(payment)
     db.add(
@@ -51,7 +47,7 @@ async def create_payment(
             payload={
                 "payment_id": str(payment.id),
                 "tenant_id": str(tenant_id),
-                "amount": str(amount),
+                "amount": amount,
                 "currency": currency,
             },
         )

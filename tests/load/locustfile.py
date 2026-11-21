@@ -28,7 +28,7 @@ def _headers(key: str) -> dict[str, str]:
 
 
 def _body() -> dict[str, Any]:
-    return {"amount": round(random.uniform(1.00, 500.00), 2), "currency": "USD"}
+    return {"amount": random.randint(100, 50_000), "currency": "USD"}  # minor units
 
 
 class LegitimateUser(HttpUser):
