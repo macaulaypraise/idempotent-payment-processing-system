@@ -12,6 +12,48 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 2 — Ledger core
+
+**Breaking**
+- Money is an integer number of minor units everywhere: `{"amount": 1050}`
+  means 10.50. Floats and numeric strings are rejected with 422. Responses
+  return integers. Existing payments are migrated (`amount * 100`).
+- The app should connect as the restricted role: set `MIGRATION_DATABASE_URL`
+  (owner), `APP_DB_ROLE`, `APP_DB_PASSWORD`, and point `DATABASE_URL` at the
+  app role (see `.env.example`).
+
+**Added**
+- Append-only double-entry ledger: `accounts`, `transfers`, `entries`
+  (ADR 0002). The database enforces it: deferred triggers reject unbalanced
+  transfers and transfers with fewer than two entries at COMMIT; triggers make
+  `entries`/`transfers` append-only for every role; a CHECK keeps guarded
+  wallet accounts from going negative; composite FKs keep entry and account
+  currencies equal.
+- `post_transfer`: validates, posts once per reference, updates account totals
+  with in-place increments in ascending account order (ADR 0003), and turns a
+  guard violation into `InsufficientFundsError`.
+- Wallets with pending and available accounts; tenant system accounts created
+  per currency on first use.
+- `POST /v1/wallets`, `GET /v1/wallets/{id}/balance`,
+  `GET /v1/wallets/{id}/entries` (newest first, `limit`/`before` cursor),
+  `POST /v1/transfers` (idempotent; overdraft, unknown wallet and currency
+  mismatch are stored rejections).
+- Restricted application role created by the migration; `python -m app.cli
+  configure-app-role` sets its password (run by the `migrate` service).
+- `verification/invariants.py`: SQL checks for I1, I2, I5, I6.
+- Metrics: `idempotent_requests_total{route,outcome}`,
+  `ledger_transfers_total{kind}`.
+
+**Changed**
+- `payments.version` dropped (never used).
+- Idempotent routes share one helper (`app/routers/idempotent.py`).
+- Tests run the app as `ipps_app_test` and clean up as the owner.
+- Coverage follows greenlets, so async code after a database call is counted.
+
+**Measured**: 1,000 opposing transfer pairs → 0 deadlocks; 200 concurrent
+withdrawals from a balance of 10 → exactly 10 succeed; Hypothesis: 40 random
+plans per run keep I1, I2, I5, I6.
+
 ### Stage 1 — Idempotency truth in Postgres + tenants
 
 **Breaking**

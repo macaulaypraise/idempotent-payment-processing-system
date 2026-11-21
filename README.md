@@ -99,16 +99,21 @@ curl -X POST http://localhost:8000/v1/payments \
   -H "Authorization: Bearer $IPPS_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $KEY" \
-  -d '{"amount": 99.99, "currency": "USD"}'
+  -d '{"amount": 9999, "currency": "USD"}'
 
 # Retry: identical response with "Idempotent-Replayed: true", no second payment
 curl -i -X POST http://localhost:8000/v1/payments \
   -H "Authorization: Bearer $IPPS_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $KEY" \
-  -d '{"amount": 99.99, "currency": "USD"}'
+  -d '{"amount": 9999, "currency": "USD"}'
 
 # Same key, different body: 422. Missing key: 400. Key still in flight: 409.
+
+# Amounts are integer minor units (9999 = 99.99). Wallets and transfers:
+curl -X POST http://localhost:8000/v1/wallets \
+  -H "Authorization: Bearer $IPPS_API_KEY" -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" -d '{"currency": "USD"}'
 ```
 
 ---

@@ -1,6 +1,6 @@
 # 0003. Update account totals with atomic in-place increments in sorted order
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented in Stage 2)
 - **Date:** 2026-11-21
 - **Stage:** 2
 
@@ -46,6 +46,15 @@ concurrency on hot rows turns contention into retry storms.
 - Totals are a cache of the entries; invariant I5 checks they agree.
 - One function that locks in a different order is enough to reintroduce
   deadlocks, so lock order is a review checklist item.
+
+## Results (Stage 2)
+
+- 1,000 pairs of opposing transfers (A→B and B→A, 100 pairs at a time,
+  2,000 transfers) finished with 0 deadlocks and both balances unchanged.
+- Planted bug: locking accounts in line order instead of sorted order makes
+  the same test fail with deadlocks, so the test can detect the problem.
+- 200 concurrent 1-unit withdrawals from a wallet holding 10: exactly 10
+  succeed, 190 get `InsufficientFundsError`, the balance never goes negative.
 
 ## What would change my mind
 

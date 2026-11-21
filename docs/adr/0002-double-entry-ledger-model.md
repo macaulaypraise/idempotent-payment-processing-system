@@ -1,6 +1,6 @@
 # 0002. Model money as an append-only double-entry ledger in Postgres
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented in Stage 2)
 - **Date:** 2026-11-21
 - **Stage:** 2
 
@@ -45,6 +45,27 @@ need such a model to check against.
 6. The ledger is updated synchronously, in the same transaction as the state
    change that causes it, never by an asynchronous consumer.
 
+### As built (Stage 2)
+
+- System accounts are created **lazily per currency** (the first wallet in a
+  currency creates the tenant's `psp_clearing`, `bank`, `psp_fees`,
+  `refunds_payable` for it), rather than at tenant creation, because a tenant
+  can hold several currencies. A partial unique index keeps it to one each.
+- `wallets` reference their two accounts with composite FKs on
+  `(account_id, currency)`; `accounts.wallet_id` has no FK, to avoid a
+  circular dependency. Entries also use a composite FK, so an entry's
+  currency cannot differ from its account's.
+- `entries` carry no `tenant_id`; tenancy comes from the account.
+- Wallet-to-wallet transfers use `reference_id = uuid5(tenant:idempotency_key)`,
+  so the ledger's own unique constraint backs up the idempotency layer.
+- The application role (`APP_DB_ROLE`, default `ipps_app`) is created
+  `NOLOGIN` by the migration with the grants it needs; `python -m app.cli
+  configure-app-role` (run by the compose `migrate` service as the owner) sets
+  its password. Tests use a separate role, `ipps_app_test`.
+- There is no API to put money into a wallet until Stage 3 (captured
+  payments credit `wallet_pending`). Tests fund wallets by posting from
+  `psp_clearing` directly.
+
 ## Alternatives considered
 
 | Option | Why not |
@@ -62,6 +83,16 @@ need such a model to check against.
 - System accounts (`psp_clearing`, `bank`, `psp_fees`) are hot rows. They cap
   worker throughput per tenant; the ceiling is measured in Stage 8.
 - Partial refunds and FX are out of scope; one currency per transfer.
+
+## Results (Stage 2)
+
+- Hypothesis property test: 40 random plans per run (up to 25 transfers
+  across four funded wallets) hold I1, I2, I5, I6 and match a Python model of
+  balances. A planted bug that drops some credit-side totals is caught.
+- An unbalanced transfer, a transfer with fewer than two entries, and an
+  entry in the wrong currency are all rejected by the database. UPDATE,
+  DELETE and TRUNCATE on `entries`/`transfers` fail for the app role
+  (permission denied) and for the owner (trigger).
 
 ## What would change my mind
 

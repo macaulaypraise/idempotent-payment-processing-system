@@ -36,8 +36,8 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | D12 | Same key with a different body silently replays the first response; no fingerprint, no 422. | `payment_service.py` | code | ✅ fixed — Stage 1 |
 | D13 | Replays after a Redis restart are rebuilt from the current row, so they can differ from the original response (status moved on). Breaks I9. | `payment_service.py` IntegrityError branch | code | ✅ fixed — Stage 1 (response stored in Postgres) |
 | D14 | Idempotency keys are global, not per tenant; no authentication. | `app/models/payment.py` | code | ✅ fixed — Stage 1 |
-| D15 | Money is `Numeric(12,2)` in the DB and `float` in the schema, service and outbox payload. | `models/payment.py`, `schemas/payment.py`, `payment_service.py` | code | Stage 2 (`BIGINT` minor units) |
-| D16 | `version` column is never used. | `models/payment.py` | code | Stage 2 (dropped) |
+| D15 | Money is `Numeric(12,2)` in the DB and `float` in the schema, service and outbox payload. | `models/payment.py`, `schemas/payment.py`, `payment_service.py` | code | ✅ fixed — Stage 2 (integer minor units everywhere) |
+| D16 | `version` column is never used. | `models/payment.py` | code | ✅ fixed — Stage 2 (dropped) |
 | D17 | State machine is enforced only in Python. The DB has an enum but no transition guard. `FAILED → PENDING` is allowed. | `app/services/state_machine.py`, initial migration | code | Stage 3 (DB guard; `FAILED` terminal) |
 | D18 | Test fixtures build the schema with `Base.metadata.create_all`, not Alembic, so constraints and triggers written in raw SQL in migrations would be missing in tests. | `tests/conftest.py` | code | ✅ fixed — Stage 1 (fixtures run Alembic) |
 
@@ -63,8 +63,18 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 |---|---|---|---|
 | S1-1 | The API process created a Kafka producer and HTTP client at startup that it never used, so Kafka down meant the API could not start. **Removed in Stage 1.** | `app/main.py` | done |
 | S1-2 | `processed_events` PK is `(event_id, consumer_group)`; DESIGN.md says `(consumer_group, event_id)`. Same uniqueness; revisit when dedup moves to outbox ids. | initial migration | 5 |
-| S1-3 | `payments.amount` is still `Numeric(12,2)`; the API now takes `Decimal` with at most 2 places, never `float`. Minor units come in Stage 2. | `schemas/payment.py` | 2 |
+| S1-3 | `payments.amount` was still `Numeric(12,2)` after Stage 1. **Done in Stage 2** (BIGINT minor units). | `schemas/payment.py` | done |
 | S1-4 | Each Redis breaker trip logs one warning per in-flight request; noisy during an outage. Rate-limit the log if it matters. | `services/response_cache.py` | 9 |
+
+## Found during Stage 2
+
+| # | Item | Where | Stage |
+|---|---|---|---|
+| S2-1 | Coverage under-reported code after a database await: SQLAlchemy's asyncio layer uses greenlets and coverage did not follow them. Fixed with `concurrency = ["greenlet", "thread"]`; earlier coverage figures (83-88%) were understated. | `pyproject.toml` | done |
+| S2-2 | No way to fund a wallet through the API until captured payments credit `wallet_pending` and settlement releases to `wallet_available`. | — | 3, 6 |
+| S2-3 | Test cleanup truncates append-only tables with `session_replication_role = replica`, which needs a superuser owner (true for docker-compose and CI). A managed Postgres without superuser would need per-test databases instead. | `tests/conftest.py` | 8 |
+| S2-4 | Managed Postgres may not let the migration user `CREATE ROLE`; then create `APP_DB_ROLE` by hand once before migrating. | migration `c3a8d1e6f204` | 8 |
+| S2-5 | Hot system accounts (`psp_clearing`, `bank`) will serialise posting per tenant and currency once Stage 3 posts captures; measure before optimising. | `services/ledger.py` | 8 |
 
 ## Parked ideas (not in any current stage)
 
