@@ -47,3 +47,4 @@ Thumbs.db
 # Windows/WSL download markers
 *:Zone.Identifier
 *Zone.Identifier
+tests/load/results/
