@@ -12,6 +12,43 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 7 (part 1 of 2) — Verification harness: model and state machine
+
+**Added**
+- `verification/machine.py`: a Hypothesis state machine over the whole
+  system in-process (API, PSP simulator, outbox publisher, charger, sweeper,
+  webhook processor, reconciliation, real database). Client, worker and
+  fault rules; events consumed and webhooks delivered in any order and more
+  than once; Redis up or down per history; a quiesce step that drains every
+  worker under faults, then after recovery, then reconciles.
+- Safety invariants (I1, I2, I3 with provider ground truth, I5, I6) and
+  replay identity (I9) after every step; I4, I7, I10, the model and "no
+  unexplained reconciliation item" after quiesce.
+- `verification/model.py`: the client's view rebuilt from its history;
+  end states and wallet balances derived from the provider's ground truth.
+- `verification/history.py` (JSONL histories) and `verification/checker.py`
+  (`python -m verification.checker --history … --ground-truth …`).
+- `verification/database.py`: one table list for resetting, shared with the
+  test suite.
+- Harness self-test: `app/core/planted_bugs.py` (`fresh_provider_key`,
+  never active in production); `test_harness_catches_a_planted_bug` must
+  find the double charge.
+- `make verify-quick` (PR profile, in every CI run) and `make verify`
+  (nightly profile); `.github/workflows/nightly.yml` with a summary and the
+  failing history as an artifact; Hypothesis example database cached.
+- `docs/verification.md` (what is checked, what is not, bug log), ADR 0009.
+
+**Measured**: nightly profile, 400 histories, 9,026 steps, 1,614 provider
+charges, 132 refunds, 0 violations; the planted bug is found in 12–18
+histories. Hand-planted bugs: no fingerprint check on the Postgres path
+(caught, PR profile), double release under an active refund (caught,
+nightly), webhook processor dropping early events (not caught: healed by
+the sweeper and reconciliation, documented).
+
+**Fixed in the harness while building it** (bug log in docs/verification.md):
+faults cleared before in-flight work met them; Redis always up hid the
+Postgres replay path; a fixed worker order hid retry bugs.
+
 ### Stage 6 — Reconciliation
 
 **Added**

@@ -119,6 +119,16 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | S6-6 | Captures before Stage 4 (the v1 mock provider) have no provider charge, so a run whose window covers their date reports them `missing_at_psp`. They are real findings, not bugs. | — | — |
 | S6-7 | The fee rule (2.9% + 30) lives in the simulator only; the ledger records whatever fee the file says. A contract check on fees is a separate reconciliation. | — | — |
 
+## Found during Stage 7
+
+| # | Item | Where | Stage |
+|---|---|---|---|
+| S7-1 | Toxiproxy fault layer (latency, reset, blackhole) + process kills, scenario runner writing JSONL, checked by `verification.checker`. | verification | 7 part 2 |
+| S7-2 | The state machine is sequential; add a rule that runs two client requests or two worker steps concurrently (`asyncio.gather`). | verification | — |
+| S7-3 | Transfers are rarely acknowledged in histories (money must be settled first); a rule that reconciles before transferring would exercise them more. | verification | — |
+| S7-4 | Crash rules: arm a failpoint (`raise` mode) for one worker step, then continue. | verification | — |
+| S7-5 | I8 is only checked indirectly; check that every outbox row was handed to the queue exactly once per publish. | verification | — |
+
 ## Parked ideas (not in any current stage)
 
 - `provectuslabs/kafka-ui` is no longer maintained; `kafbat/kafka-ui` is the
