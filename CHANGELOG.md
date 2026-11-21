@@ -12,6 +12,45 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 6 — Reconciliation
+
+**Added**
+- Simulator settlement files: `GET /settlements/{date}` serves the day's
+  CSV (`line_id, type, psp_reference, merchant_reference, gross, fee, net,
+  currency`; fee 2.9% + 30). Files are deterministic: line ids are provider
+  references and random faults are drawn per reference. Faults: amount
+  mismatch, missing line, duplicate line, extra (unknown) line, by profile
+  rate or injected with `POST|DELETE /admin/settlements/{date}/faults`.
+- `settlement_lines`, `recon_runs`, `recon_items`; `settlement_line_id` on
+  payments and refunds, set once (trigger-guarded). Migration `b9d5e3f1a274`.
+- `app/services/reconciliation.py` (ADR 0008, `docs/reconciliation.md`):
+  idempotent load, one transaction per line, match on provider then
+  merchant reference, classify as `matched`, `healed`, `amount_mismatch`,
+  `missing_in_ledger`, `duplicate_line`, `missing_at_psp` or
+  `status_conflict`. Matches post `settlement_charge` (bank net, psp_fees
+  fee, psp_clearing gross) and `release` (skipped while a refund holds the
+  money), move `CAPTURED` to `SETTLED`; refund lines post
+  `settlement_refund`. `PROCESSING` payments and refunds the provider
+  settled are healed through `apply_psp_result` / `apply_refund_result`.
+  Advisory lock per date; crashed runs are marked `abandoned`.
+- `POST /v1/reconciliations`, `GET /v1/reconciliations/{id}`
+  (`?classification=`, `?unexplained_only=`), platform API keys only.
+- `python -m app.workers.recon_job --date …` and `make recon DATE=…` (exit
+  code 2 when items are unexplained).
+- Metrics `recon_items_total{classification}`, `recon_unexplained_items`,
+  `recon_last_success_timestamp_seconds`; Prometheus alert rules
+  `ReconciliationUnexplainedItems`, `ReconciliationStale`
+  (`prometheus/alerts.yml`).
+- `verification`: I7 (`psp_clearing` and, with no refund in flight,
+  `refunds_payable` are zero once everything is reconciled).
+- Settings `RECON_PROVIDER`, `RECON_SETTLEMENT_WINDOW_DAYS` (default 1).
+
+**Measured**: 30 payments with 30% of responses lost, every webhook dropped
+and the sweeper off left 15 `PROCESSING`; one run over 330 lines → 315
+matched, 15 healed, 0 unexplained, all `SETTLED`, `psp_clearing` 0; the
+re-run posted 0. Injected amount mismatch, duplicate and extra lines were
+classified on the day, and the missing line by the next day's run.
+
 ### Stage 5 — Inbox and outbox
 
 **Breaking**

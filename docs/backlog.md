@@ -104,8 +104,20 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | S5-2 | `payments.v1` is auto-created with one partition. Create topics explicitly (partitions, retention) as part of deployment. | Kafka | 8 |
 | S5-3 | The relay sends one row at a time (ordering first). Measure throughput under load before pipelining. | `services/outbox_poller.py` | 8 |
 | S5-4 | `webhook_events` has no retention; delete `processed`/`ignored` rows after N days. | inbox | 8 |
-| S5-5 | Dropped webhooks (fault `webhook_drop_rate`) are only caught by the sweeper or reconciliation; Stage 6 reconciles against the provider. | — | 6 |
+| S5-5 | **Done in Stage 6.** Dropped webhooks with a lost response are healed by reconciliation. | — | done |
 | S5-6 | Relay lock connections need TCP keepalives when hosted, so a vanished leader's lock is released promptly. | deploy | 8 |
+
+## Found during Stage 6
+
+| # | Item | Where | Stage |
+|---|---|---|---|
+| S6-1 | Unexplained items have a `resolved` column but no endpoint or audit trail to resolve them. | recon API | 9 |
+| S6-2 | Reconciliation metrics live in the process that ran it; CLI runs alert by exit code only, and an API restart resets the gauges. Schedule runs and derive the gauges from `recon_runs` when hosting. | metrics | 8 |
+| S6-3 | Merchants cannot see the report for their own payments (platform keys only). A per-tenant read view would filter items by tenant. | recon API | 9 |
+| S6-4 | A settlement line that changes between downloads keeps its first version silently. Store a content hash and report changed lines. | reconciliation | — |
+| S6-5 | No reconciliation of the bank statement against the `bank` account. | — | — |
+| S6-6 | Captures before Stage 4 (the v1 mock provider) have no provider charge, so a run whose window covers their date reports them `missing_at_psp`. They are real findings, not bugs. | — | — |
+| S6-7 | The fee rule (2.9% + 30) lives in the simulator only; the ledger records whatever fee the file says. A contract check on fees is a separate reconciliation. | — | — |
 
 ## Parked ideas (not in any current stage)
 

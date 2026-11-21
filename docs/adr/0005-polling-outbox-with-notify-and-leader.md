@@ -85,8 +85,13 @@ single-node KRaft Kafka 4.2.1; 300 payments from 20 concurrent clients, with
 | Messages on `payments.v1` after the run | 600 for 600 rows (no duplicates; the kill happened while idle) |
 | Leader-only publishing (integration test, two relays, 40 events) | leader 40, standby 0 |
 
-The p99 is within the < 1 s target, but it is a sandbox number with sends
-acknowledged one at a time; the user's WSL2 numbers go in STAGE-5.md. Lag
+On the developer's WSL2 machine with the full compose stack (two relay
+replicas, single-node Kafka): 110 Stage 5 events, **p50 14.9 ms, p99
+138.6 ms**; `docker kill` of the leader replica handed over to the standby
+with no lost payments; `payments.v1` held exactly 110 messages.
+
+Both p99s are within the < 1 s target, with sends acknowledged one at a
+time. Lag
 includes the time from building the row to the request's COMMIT, because
 `created_at` is set when the row object is created.
 
