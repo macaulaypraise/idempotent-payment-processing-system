@@ -34,6 +34,11 @@ class UnauthorizedError(HTTPException):
         )
 
 
+class ForbiddenError(HTTPException):
+    def __init__(self, detail: str = "Not allowed for this API key") -> None:
+        super().__init__(status_code=403, detail=detail)
+
+
 class InvalidStateTransitionError(HTTPException):
     def __init__(self, current_status: str, new_status: str) -> None:
         super().__init__(

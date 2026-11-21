@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # for the lock this often, so it also bounds failover time.
     OUTBOX_BATCH_SIZE: int = 100
     OUTBOX_FALLBACK_POLL_SECONDS: float = 5.0
+    # Reconciliation: the provider name stored on settlement lines, and how
+    # many days after a capture its settlement line may still arrive. The run
+    # for date D reports captures from D - window that no file mentioned.
+    RECON_PROVIDER: str = "psp"
+    RECON_SETTLEMENT_WINDOW_DAYS: int = 1
     # Crash points for testing, e.g. "charger.after_provider_call=exit".
     # Ignored when APP_ENV=production.
     FAILPOINTS: str = ""

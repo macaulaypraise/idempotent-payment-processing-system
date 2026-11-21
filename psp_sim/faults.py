@@ -18,6 +18,11 @@ class FaultProfile:
     webhook_drop_rate: float = 0.0  # never send the webhook (until redelivered)
     webhook_duplicate_rate: float = 0.0  # send the same webhook twice
     webhook_delay_max_seconds: float = 0.0  # send after a random delay up to this
+    # Settlement files: per-line faults, decided per reference (stable)
+    settlement_amount_mismatch_rate: float = 0.0
+    settlement_missing_rate: float = 0.0
+    settlement_duplicate_rate: float = 0.0
+    settlement_extra_rate: float = 0.0  # per file: one line for a charge never made
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():

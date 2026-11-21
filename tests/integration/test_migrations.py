@@ -124,3 +124,27 @@ async def test_outbox_backlog_is_numbered_oldest_first(scratch_url: str) -> None
         )
     }
     assert "webhook_events" not in tables
+
+
+async def test_stage6_reconciliation_tables_come_and_go(scratch_url: str) -> None:
+    await asyncio.to_thread(command.upgrade, _alembic(scratch_url), "head")
+    tables = {
+        r[0]
+        for r in await _query(
+            scratch_url,
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public'",
+        )
+    }
+    assert {"settlement_lines", "recon_runs", "recon_items"} <= tables
+
+    await asyncio.to_thread(command.downgrade, _alembic(scratch_url), "a7f3c2d8e190")
+    columns = {
+        r[0]
+        for r in await _query(
+            scratch_url,
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'payments'",
+        )
+    }
+    assert "settlement_line_id" not in columns

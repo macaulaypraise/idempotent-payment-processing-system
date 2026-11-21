@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS webhooks (
     delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_webhooks_due ON webhooks (status, next_attempt_at);
+-- Faults injected into a day's settlement file through the admin API
+CREATE TABLE IF NOT EXISTS settlement_faults (
+    file_date TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    psp_reference TEXT
+);
 """
 
 
@@ -290,8 +296,34 @@ class Store:
                 (*changes.values(), webhook_id),
             )
 
+    # --- settlement faults ------------------------------------------------------
+
+    def add_settlement_fault(
+        self, file_date: str, kind: str, psp_reference: str | None
+    ) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO settlement_faults VALUES (?, ?, ?)",
+                (file_date, kind, psp_reference),
+            )
+
+    def settlement_faults(self, file_date: str) -> list[tuple[str, str | None]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT kind, psp_reference FROM settlement_faults WHERE file_date = ?",
+                (file_date,),
+            ).fetchall()
+        return [(r["kind"], r["psp_reference"]) for r in rows]
+
+    def clear_settlement_faults(self, file_date: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "DELETE FROM settlement_faults WHERE file_date = ?", (file_date,)
+            )
+
     def reset(self) -> None:
         with self._lock:
             self._db.execute("DELETE FROM charges")
             self._db.execute("DELETE FROM refunds")
             self._db.execute("DELETE FROM webhooks")
+            self._db.execute("DELETE FROM settlement_faults")

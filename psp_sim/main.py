@@ -8,6 +8,8 @@
     GET|PUT /admin/faults, POST /admin/reset, GET /health
     GET  /admin/webhooks[?status=], POST /admin/webhooks/{id}/redeliver,
     POST /admin/webhooks/drain  deliver every pending webhook now
+    GET  /settlements/{date}    the day's settlement file (CSV)
+    POST|DELETE /admin/settlements/{date}/faults  inject or clear file faults
 
 Every recorded charge and refund also produces a signed webhook (see
 webhooks.py) when PSP_SIM_WEBHOOK_URL is set.
@@ -23,12 +25,14 @@ import hashlib
 import json
 import os
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from datetime import date
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from psp_sim import settlement
 from psp_sim.faults import FaultProfile, Faults
 from psp_sim.store import Store
 from psp_sim.webhooks import Sender, WebhookDispatcher
@@ -60,7 +64,20 @@ class FaultsRequest(BaseModel):
     webhook_drop_rate: float = 0.0
     webhook_duplicate_rate: float = 0.0
     webhook_delay_max_seconds: float = 0.0
+    settlement_amount_mismatch_rate: float = 0.0
+    settlement_missing_rate: float = 0.0
+    settlement_duplicate_rate: float = 0.0
+    settlement_extra_rate: float = 0.0
     seed: int | None = None
+
+
+class SettlementFault(BaseModel):
+    kind: Literal["amount_mismatch", "missing", "duplicate", "extra"]
+    psp_reference: str | None = None  # required except for "extra"
+
+
+class SettlementFaultsRequest(BaseModel):
+    faults: list[SettlementFault]
 
 
 def _fingerprint(body: BaseModel, exclude: set[str] | None = None) -> str:
@@ -235,6 +252,40 @@ def create_app(
     @app.post("/admin/webhooks/drain")
     async def drain_webhooks() -> dict[str, int]:
         return {"accepted": await dispatcher.drain()}
+
+    @app.get("/settlements/{file_date}", response_class=PlainTextResponse)
+    async def settlement_file(file_date: date) -> PlainTextResponse:
+        truth = store.ground_truth()
+        injected = [
+            settlement.Fault(kind, ref)
+            for kind, ref in store.settlement_faults(file_date.isoformat())
+        ]
+        lines = settlement.build_file(
+            file_date,
+            truth["charges"],
+            truth["refunds"],
+            profile=faults.profile,
+            seed=faults.seed,
+            injected=injected,
+        )
+        return PlainTextResponse(settlement.render_csv(lines), media_type="text/csv")
+
+    @app.post("/admin/settlements/{file_date}/faults")
+    async def inject_settlement_faults(
+        file_date: date, body: SettlementFaultsRequest
+    ) -> dict[str, Any]:
+        for fault in body.faults:
+            if fault.kind != "extra" and not fault.psp_reference:
+                raise HTTPException(422, f"{fault.kind} needs psp_reference")
+            store.add_settlement_fault(
+                file_date.isoformat(), fault.kind, fault.psp_reference
+            )
+        return {"file_date": file_date.isoformat(), "faults": len(body.faults)}
+
+    @app.delete("/admin/settlements/{file_date}/faults")
+    async def clear_settlement_faults(file_date: date) -> dict[str, str]:
+        store.clear_settlement_faults(file_date.isoformat())
+        return {"file_date": file_date.isoformat(), "faults": "cleared"}
 
     @app.post("/admin/reset")
     async def reset() -> dict[str, str]:

@@ -8,6 +8,7 @@ than 408/429 raises PspRejected: retrying the same request will not help.
 
 import asyncio
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import httpx
@@ -93,6 +94,19 @@ class PspClient:
             succeeded=data["status"] == "succeeded",
             failure_reason=data.get("failure_reason"),
         )
+
+    async def settlement_file(self, file_date: date) -> str:
+        """The provider's settlement CSV for a UTC date."""
+        try:
+            async with asyncio.timeout(self._timeout * 10):  # files are larger
+                resp = await self._http.get(f"/settlements/{file_date.isoformat()}")
+        except (TimeoutError, httpx.TransportError) as exc:
+            raise PspUnavailable(
+                f"settlement {file_date}: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code >= 400:
+            raise PspUnavailable(f"settlement {file_date}: HTTP {resp.status_code}")
+        return resp.text
 
 
 def build_psp_client(base_url: str, timeout_seconds: float) -> PspClient:

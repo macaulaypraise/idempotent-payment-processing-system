@@ -55,6 +55,10 @@ class Refund(Base):
     psp_reference = mapped_column(String(128), nullable=True)
     attempts = mapped_column(Integer, nullable=False, default=0, server_default="0")
     next_attempt_at = mapped_column(DateTime(timezone=True), nullable=True)
+    # The settlement line that settled this row; set once (trigger-guarded)
+    settlement_line_id = mapped_column(
+        UUID(as_uuid=True), ForeignKey("settlement_lines.id"), nullable=True
+    )
     created_at = mapped_column(
         DateTime(timezone=True),
         nullable=False,

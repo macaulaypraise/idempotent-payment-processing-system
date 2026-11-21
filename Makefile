@@ -164,8 +164,8 @@ verify-faults: ## [Stage 7] Toxiproxy fault-injection scenarios
 bench: ## [Stage 8] Headless Locust benchmark with CSV output
 	@echo "make bench: not implemented yet (Stage 8)"; exit 1
 
-recon: ## [Stage 6] Run reconciliation for a date
-	@echo "make recon: not implemented yet (Stage 6)"; exit 1
+recon: ## Reconcile a provider file date (UTC): make recon [DATE=YYYY-MM-DD], default today
+	docker compose exec api .venv/bin/python -m app.workers.recon_job --date "$(or $(DATE),$(shell date -u +%F))"
 
 demo: ## [Stage 8] Scripted three-minute demo
 	@echo "make demo: not implemented yet (Stage 8)"; exit 1

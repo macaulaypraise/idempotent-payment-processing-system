@@ -35,7 +35,8 @@ _CLEAN_SQL = (
     # docker-compose and CI).
     "SET session_replication_role = replica",
     "TRUNCATE TABLE refunds, entries, transfers, payments, wallets, accounts, "
-    "idempotency_keys, api_keys, outbox_events, processed_events, webhook_events "
+    "idempotency_keys, api_keys, outbox_events, processed_events, webhook_events, "
+    "recon_items, recon_runs, settlement_lines "
     "RESTART IDENTITY CASCADE",
     f"DELETE FROM tenants WHERE id <> '{DEFAULT_TENANT_ID}'",
     "SET session_replication_role = DEFAULT",

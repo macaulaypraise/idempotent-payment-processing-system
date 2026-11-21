@@ -8,7 +8,14 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from app.config import get_settings
 from app.core.logging import setup_logging
 from app.core.redis_client import close_redis_client, create_redis_client
-from app.routers import health, payments, refunds, wallets, webhooks
+from app.routers import (
+    health,
+    payments,
+    reconciliations,
+    refunds,
+    wallets,
+    webhooks,
+)
 from app.services.response_cache import ResponseCache
 
 
@@ -35,6 +42,7 @@ app.include_router(payments.router, tags=["payments"])
 app.include_router(wallets.router, tags=["wallets"])
 app.include_router(refunds.router, tags=["refunds"])
 app.include_router(webhooks.router, tags=["webhooks"])
+app.include_router(reconciliations.router, tags=["reconciliation"])
 app.include_router(health.router, tags=["health"])
 
 

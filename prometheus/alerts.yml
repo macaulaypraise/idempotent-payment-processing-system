@@ -1,0 +1,27 @@
+# Correctness alerts (DESIGN section 3: alerts fire on I1, I3, I5 and I7).
+# Stage 6 adds reconciliation; the ledger invariants get alerts with the
+# Stage 7 checker. No Alertmanager locally: firing alerts show in the
+# Prometheus UI (http://localhost:9090/alerts).
+groups:
+  - name: reconciliation
+    rules:
+      - alert: ReconciliationUnexplainedItems
+        # Set by the API process when it runs a reconciliation (POST
+        # /v1/reconciliations). The CLI job signals the same with exit code 2.
+        expr: recon_unexplained_items > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Last reconciliation run left {{ $value }} unexplained items"
+          description: >-
+            The provider's settlement file and the ledger disagree. Open the
+            run (GET /v1/reconciliations/{id}?unexplained_only=true); see
+            docs/reconciliation.md for what each classification means.
+      - alert: ReconciliationStale
+        expr: >-
+          recon_last_success_timestamp_seconds > 0
+          and time() - recon_last_success_timestamp_seconds > 36 * 3600
+        labels:
+          severity: ticket
+        annotations:
+          summary: "No reconciliation has completed for over 36 hours"

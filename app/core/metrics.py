@@ -74,3 +74,16 @@ outbox_publish_lag_seconds = Histogram(
 )
 
 outbox_leader = Gauge("outbox_leader", "1 while this relay holds the outbox lock")
+
+# Reconciliation (Stage 6). Set by the process that ran the reconciliation.
+recon_items_total = Counter(
+    "recon_items_total", "Reconciliation items by classification", ["classification"]
+)
+recon_unexplained_items = Gauge(
+    "recon_unexplained_items",
+    "Unexplained items in the last completed reconciliation run",
+)
+recon_last_success_timestamp = Gauge(
+    "recon_last_success_timestamp_seconds",
+    "Unix time the last reconciliation run completed",
+)

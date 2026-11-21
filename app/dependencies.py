@@ -4,13 +4,18 @@ from typing import cast
 from fastapi import Depends, Header, Request
 from redis.asyncio import Redis
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.clients.psp import PspClient, build_psp_client
 from app.config import Settings, get_settings
 from app.core.database import get_db
-from app.core.exceptions import IdempotencyKeyMissingError, UnauthorizedError
+from app.core.exceptions import (
+    ForbiddenError,
+    IdempotencyKeyMissingError,
+    UnauthorizedError,
+)
 from app.core.security import hash_api_key, parse_bearer_token
-from app.models.tenant import ApiKey
+from app.models.tenant import DEFAULT_TENANT_ID, ApiKey
 from app.services.response_cache import ResponseCache
 
 
@@ -66,3 +71,30 @@ async def require_idempotency_key(
             "characters"
         )
     return key
+
+
+async def require_platform_tenant(
+    tenant_id: uuid.UUID = Depends(get_current_tenant),
+) -> uuid.UUID:
+    """Platform operations (reconciliation) settle every tenant's money, so
+    only API keys of the platform tenant may run or read them."""
+    if tenant_id != DEFAULT_TENANT_ID:
+        raise ForbiddenError("reconciliation needs a platform API key")
+    return tenant_id
+
+
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """For work that spans many transactions (one per settlement line)."""
+    from app.core.database import AsyncSessionFactory
+
+    return AsyncSessionFactory
+
+
+async def get_psp_client(
+    request: Request, settings: Settings = Depends(get_settings_dep)
+) -> PspClient:
+    client = getattr(request.app.state, "psp_client", None)
+    if client is None:
+        client = build_psp_client(settings.PSP_BASE_URL, settings.PSP_TIMEOUT_SECONDS)
+        request.app.state.psp_client = client
+    return cast(PspClient, client)

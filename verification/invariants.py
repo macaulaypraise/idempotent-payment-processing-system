@@ -6,8 +6,9 @@ tests that share a database can check only their own data. I2 is global by
 nature; with a tenant it checks that tenant's slice of the ledger.
 
 Implemented: I1, I2, I5, I6 (Stage 2); I4 for payments and refunds
-(Stage 3); I3 (Stage 4, needs the PSP simulator's ground truth). I7-I10
-arrive with the stages that create the data they check.
+(Stage 3); I3 (Stage 4, needs the PSP simulator's ground truth); I7
+(Stage 6, meaningful only once every settlement file is reconciled, so it
+is not part of check_ledger). I8-I10 arrive with Stage 7.
 """
 
 import uuid
@@ -261,3 +262,44 @@ async def check_ledger(
     for check in LEDGER_INVARIANTS:
         violations.extend(await check(db, tenant_id))
     return violations
+
+
+async def i7_clearing_accounts_settled(
+    db: AsyncSession, tenant_id: uuid.UUID | None = None
+) -> list[str]:
+    """I7: once every settlement file is reconciled, psp_clearing is zero,
+    and so is refunds_payable when no refund is in flight.
+
+    Call it only when the system is quiet and reconciled; mid-day, captured
+    but unsettled money sits in psp_clearing by design."""
+    in_flight = (
+        await db.execute(
+            text(
+                "SELECT count(*) FROM refunds r "
+                "WHERE r.status IN ('PENDING', 'PROCESSING') "
+                + _tenant_filter("r", tenant_id)
+            ),
+            {"tenant_id": tenant_id},
+        )
+    ).scalar_one()
+    kinds = ["psp_clearing"] + ([] if in_flight else ["refunds_payable"])
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT a.tenant_id, a.kind, a.currency,
+                       a.debits_posted - a.credits_posted AS net
+                FROM accounts a
+                WHERE a.kind = ANY(:kinds) AND a.debits_posted <> a.credits_posted
+                {_tenant_filter("a", tenant_id)}
+                ORDER BY a.tenant_id, a.kind, a.currency
+                """
+            ),
+            {"kinds": kinds, "tenant_id": tenant_id},
+        )
+    ).all()
+    return [
+        f"I7: {r.kind} {r.currency} for tenant {r.tenant_id} is {r.net} "
+        "(debits - credits), not 0"
+        for r in rows
+    ]
