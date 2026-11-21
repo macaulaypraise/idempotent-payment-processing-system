@@ -12,6 +12,63 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 5 — Inbox and outbox
+
+**Breaking**
+- `POST /v1/webhooks` (unauthenticated placeholder) is removed. Provider
+  webhooks go to `POST /v1/webhooks/psp` and must carry a valid
+  `PSP-Signature`; set `PSP_WEBHOOK_SECRET` (empty rejects everything).
+- Kafka topics: every `payment.*` and `refund.*` event is published to
+  `payments.v1` keyed by payment id; `dlq.v1` to `dlq.v1`. Message values now
+  include `event_id` and `event_type`. The old per-type topics are no longer
+  written or read (anything stranded there is recovered by the sweeper).
+
+**Added**
+- Webhook inbox (ADR 0007): HMAC-SHA256 over `"{timestamp}.{raw body}"`,
+  ±`PSP_WEBHOOK_TOLERANCE_SECONDS`, constant-time compare, rotation-friendly;
+  `webhook_events` with unique `(provider, provider_event_id)`; 200 for new
+  and duplicate events, 400 (nothing stored) for bad signatures or malformed
+  events, 413 over `WEBHOOK_MAX_BODY_BYTES`.
+- `app/workers/webhook_processor.py`: claims due inbox rows with
+  `SKIP LOCKED`, applies them through `apply_psp_result` /
+  `apply_refund_result` in the same transaction as the status change; parks
+  events that cannot apply yet (backoff, then `dead` + `dlq.v1` after
+  `WEBHOOK_MAX_ATTEMPTS`); dead-letters contradictions at once; ignores
+  unknown types. Compose service `webhook_processor`.
+- Simulator webhooks: every charge and refund produces a signed event,
+  stored before the response is sent; delivery retried on non-2xx; faults
+  `webhook_drop_rate`, `webhook_duplicate_rate`, `webhook_delay_max_seconds`;
+  `GET /admin/webhooks`, `POST /admin/webhooks/{id}/redeliver`,
+  `POST /admin/webhooks/drain`. Refunds accept and echo `merchant_reference`
+  (the charger sends the refund id). Older simulator stores are upgraded in
+  place.
+- Outbox relay (ADR 0005, now Accepted): `outbox_events.seq` identity column
+  (backlog numbered by `created_at`), partial index on unpublished rows,
+  statement-level `NOTIFY` trigger; one leader per advisory lock on a
+  dedicated asyncpg connection, LISTEN plus `OUTBOX_FALLBACK_POLL_SECONDS`
+  fallback, leadership re-checked before every batch. Compose runs two
+  replicas. Idempotent producer with `acks=all`.
+- Metrics: `webhooks_received_total{result}`,
+  `webhooks_processed_total{event_type,result}`,
+  `outbox_publish_lag_seconds` (histogram), `outbox_leader`.
+- `app/core/backoff.py` (equal-jitter backoff shared by charger and
+  processor). Migration `a7f3c2d8e190`.
+
+**Fixed**
+- D9: the relay published in no order, could double-publish with two
+  replicas, sent no key, and skipped a failed send while marking later rows
+  published. It now stops at the first failure and resumes in order.
+- D10: the webhook endpoint had no signature, storage, dedup or effect.
+- A payment or refund finished by any source now clears `next_attempt_at`,
+  so the sweeper never re-drives a row a webhook already settled.
+
+**Measured**: 300 payments, 30% of provider responses lost, webhooks
+duplicated and delayed, sweeper off → all `CAPTURED`, one charge each, 65
+healed by webhook. Outbox lag p99 394 ms (p50 29 ms). Leader `kill -9` →
+standby leading 0.6 s later. NOTIFY wake-up median 5 ms vs a 30 s fallback.
+Webhook {charge, refund, duplicates} in all 6 delivery orders → one final
+state, nothing dead-lettered.
+
 ### Stage 4 — Hostile PSP simulator + charger
 
 **Added**

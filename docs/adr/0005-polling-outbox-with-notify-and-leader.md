@@ -1,6 +1,6 @@
 # 0005. Publish the outbox with one leader-elected poller, woken by NOTIFY
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented and measured in Stage 5)
 - **Date:** 2026-11-21
 - **Stage:** 5
 
@@ -29,8 +29,10 @@ and is **not** deduplicated.
    lock (`pg_try_advisory_lock`) on a dedicated, direct (non-pooled) asyncpg
    connection. If that connection drops it stops publishing immediately;
    another replica takes the lock.
-2. Add a `BIGSERIAL` sequence column to `outbox_events` (ids are UUIDs) and
-   publish in sequence order. Writers lock the aggregate row before inserting
+2. Add a sequence column to `outbox_events` (ids are UUIDs) and publish in
+   sequence order. (Implemented as `seq BIGINT GENERATED ALWAYS AS
+   IDENTITY`; rows already waiting at migration time are numbered by
+   `created_at` first, so an existing backlog drains oldest first.) Writers lock the aggregate row before inserting
    its outbox row, so sequence order follows commit order per aggregate.
 3. A statement-level trigger issues `NOTIFY` on insert. The leader `LISTEN`s
    on the same connection and wakes on a notification or a fallback timeout,
@@ -42,6 +44,10 @@ and is **not** deduplicated.
 5. Consumers deduplicate on the outbox event id carried in the message, not
    on Kafka coordinates. At-least-once publish plus idempotent consumers is
    the guarantee.
+
+Topics are consolidated at the same time: every `payment.*` and `refund.*`
+event goes to `payments.v1` keyed by payment id, `dlq.v1` has its own topic,
+and `ledger.v1` is reserved. The producer is idempotent with `acks=all`.
 
 ## Alternatives considered
 
@@ -63,6 +69,46 @@ and is **not** deduplicated.
   `LISTEN` and session advisory locks). This constrains hosting (Stage 8).
 - Raw asyncpg needs a `postgresql://` URL, not SQLAlchemy's
   `postgresql+asyncpg://`.
+
+## Results (Stage 5)
+
+Measured in the sandbox: API with 2 workers, simulator, two relay replicas,
+charger and webhook processor as host processes against Postgres 16 and
+single-node KRaft Kafka 4.2.1; 300 payments from 20 concurrent clients, with
+30% of provider responses lost and webhooks duplicated and delayed.
+
+| Measure | Result |
+|---|---|
+| Outbox lag (`published_at - created_at`, 600 events) | p50 29 ms, p95 251 ms, **p99 394 ms**, max 503 ms |
+| NOTIFY wake-up, idle leader, fallback poll 30 s (integration test, 10 inserts) | median 5 ms, max < 1 s |
+| Failover after `kill -9` of the leader (fallback poll 2 s) | standby leader after 0.6 s; nothing lost |
+| Messages on `payments.v1` after the run | 600 for 600 rows (no duplicates; the kill happened while idle) |
+| Leader-only publishing (integration test, two relays, 40 events) | leader 40, standby 0 |
+
+The p99 is within the < 1 s target, but it is a sandbox number with sends
+acknowledged one at a time; the user's WSL2 numbers go in STAGE-5.md. Lag
+includes the time from building the row to the request's COMMIT, because
+`created_at` is set when the row object is created.
+
+What the tests pin: publishing stops at the first failed send and resumes in
+order (D9); only the lock holder publishes; a standby takes over within one
+fallback interval after a clean stop or after `pg_terminate_backend` kills
+the leader's session; a NOTIFY wakes an idle leader long before its fallback
+poll; seq order matches lifecycle order for one payment.
+
+Known gaps:
+- Sends are sequential (one `send_and_wait` per row). Pipelining would raise
+  throughput but can reorder a payment's events if an early send fails after
+  a later one succeeds; ordering wins until throughput is measured as a
+  problem (Stage 8).
+- A leader whose lock session died mid-batch can finish that batch while the
+  new leader starts: duplicates, never loss or reorder within one relay.
+  Consumers deduplicate on `event_id`.
+- If the leader host vanishes without closing TCP, Postgres releases the lock
+  only when it notices the dead session; set `tcp_keepalives_*` (or
+  `idle_session_timeout`) when hosting (Stage 8).
+- `payments.v1` is auto-created with one partition. Create it with explicit
+  partitions in Stage 8.
 
 ## What would change my mind
 

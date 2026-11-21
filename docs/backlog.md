@@ -25,8 +25,8 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | # | Defect | Where | Evidence | Fixed by |
 |---|---|---|---|---|
 | D8 | Consumer dedup keys on Kafka topic/partition/offset (`uuid5`), so an event republished by the poller gets a new offset and is **not** deduplicated. | `settlement_worker.compute_event_id` | code | ✅ fixed — Stage 4 — outbox id sent as a Kafka header; charger dedups on it |
-| D9 | Outbox poller: no `ORDER BY`, no row lock (two replicas double-publish), no message key (no per-payment ordering), topic = event type, and a failed send is skipped while later rows are still marked published. | `app/services/outbox_poller.py` | code | Stage 5 (ADR 0005) |
-| D10 | Webhook endpoint accepts any body: no signature, no storage, no dedup, no effect. | `app/routers/webhooks.py` | code | Stage 5 |
+| D9 | Outbox poller: no `ORDER BY`, no row lock (two replicas double-publish), no message key (no per-payment ordering), topic = event type, and a failed send is skipped while later rows are still marked published. | `app/services/outbox_poller.py` | code | ✅ fixed — Stage 5 — seq order, stop on failure, payment-id key, leader lock, NOTIFY (ADR 0005) |
+| D10 | Webhook endpoint accepts any body: no signature, no storage, no dedup, no effect. | `app/routers/webhooks.py` | code | ✅ fixed — Stage 5 — HMAC signature, inbox with unique event id, async processor (ADR 0007) |
 
 ### Idempotency and data model (fixed in Stages 1–3)
 
@@ -82,7 +82,7 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 |---|---|---|---|
 | S3-1 | **Fixed in Stage 3.** A v1 payment (no wallet) reaching the worker would be charged, then fail to record the capture, then be retried and charged again. The worker now skips wallet-less payments *before* calling the provider. | `workers/settlement_worker.py` | done |
 | S3-2 | Refunds stayed `PENDING` after Stage 3. **Done in Stage 4** (the charger sends them). | — | done |
-| S3-3 | `payment.initiated` is still published straight to the topic named after the event type; Stage 5 consolidates topics (`payments.v1`, …). New event types (`payment.captured`, `payment.failed`, `payment.refunded`, `refund.*`) follow the same v1 pattern until then. | outbox | 5 |
+| S3-3 | **Done in Stage 5.** Topics consolidated: `payments.v1` (keyed by payment id), `dlq.v1`, `ledger.v1` reserved. | outbox | done |
 | S3-4 | v1 payments keep `wallet_id = NULL` and are excluded from I4. They cannot be refunded through `/v1/refunds`. | — | — |
 | S3-5 | v1 retry path (D2) and in-loop sleeps (D5). **Done in Stage 4** (v1 worker removed). | — | done |
 
@@ -95,6 +95,17 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | S4-3 | v1 rows in `processed_events` (consumer group `settlement-worker`) are inert and can be deleted. They caused real duplicates-skipped after the Stage 0 Kafka reset (see D8). | — | — |
 | S4-4 | `psp_sim` has no authentication; it must never be exposed beyond the compose network. | `psp_sim/` | 8 |
 | S4-5 | v1's `PAYMENT_PROVIDER_URL` is no longer read; compose sets `PSP_BASE_URL` for the charger and sweeper. | `.env` | — |
+
+## Found during Stage 5
+
+| # | Item | Where | Stage |
+|---|---|---|---|
+| S5-1 | Events already published to the old per-type topics (`payment.initiated`, `refund.created`) are no longer consumed. The sweeper picks up any payment or refund left `PENDING` past `SWEEPER_PENDING_AFTER_SECONDS`, so nothing is lost; the old topics can be deleted. | Kafka | — |
+| S5-2 | `payments.v1` is auto-created with one partition. Create topics explicitly (partitions, retention) as part of deployment. | Kafka | 8 |
+| S5-3 | The relay sends one row at a time (ordering first). Measure throughput under load before pipelining. | `services/outbox_poller.py` | 8 |
+| S5-4 | `webhook_events` has no retention; delete `processed`/`ignored` rows after N days. | inbox | 8 |
+| S5-5 | Dropped webhooks (fault `webhook_drop_rate`) are only caught by the sweeper or reconciliation; Stage 6 reconciles against the provider. | — | 6 |
+| S5-6 | Relay lock connections need TCP keepalives when hosted, so a vanished leader's lock is released promptly. | deploy | 8 |
 
 ## Parked ideas (not in any current stage)
 
