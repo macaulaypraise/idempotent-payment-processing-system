@@ -1,12 +1,13 @@
 """
 Integration tests for the full payment flow.
-Requires: real PostgreSQL + Redis (CI sidecars or docker-compose.test.yml)
+Requires: real PostgreSQL (CI service or `docker compose up -d postgres`)
 
 Covers: state machine, outbox creation, outbox polling, payment retrieval.
 Note: test_invalid_state_transition_raises is a pure unit test — it lives
 here for discoverability but requires no real infrastructure.
 """
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -18,8 +19,25 @@ from app.core.exceptions import InvalidStateTransitionError
 from app.models.outbox_event import OutboxEvent
 from app.models.payment import Payment, PaymentStatus
 from app.services.outbox_poller import poll_and_publish
-from app.services.payment_service import create_payment
+from app.services.payment_service import create_payment as _create_payment
 from app.services.state_machine import validate_transition
+from tests.conftest import DEFAULT_TENANT_ID
+
+
+async def create_payment(
+    db: AsyncSession, _redis: Redis, key: str, amount: float, currency: str
+) -> dict[str, Any]:
+    """Business write only (idempotency is covered in test_idempotency.py)."""
+    result = await _create_payment(
+        db,
+        tenant_id=DEFAULT_TENANT_ID,
+        idempotency_key=key,
+        amount=Decimal(str(amount)),
+        currency=currency,
+    )
+    await db.commit()
+    return result.body
+
 
 # Test 1: State machine — pure logic, no I/O needed
 

@@ -1,86 +1,84 @@
 import uuid
-from typing import Any, cast
+from decimal import Decimal
+from typing import Any
 
-from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import IdempotencyConflictError
-from app.core.metrics import payments_created_total
+from app.core.db_errors import violates_constraint
 from app.models.outbox_event import OutboxEvent
 from app.models.payment import Payment, PaymentStatus
-from app.services.idempotency import (
-    acquire_lock,
-    cache_response,
-    get_cached_response,
-    release_lock,
-)
+from app.services.idempotency import BusinessRejection, HandlerResult
+
+_TWO_PLACES = Decimal("0.01")
+
+
+def payment_body(payment: Payment) -> dict[str, Any]:
+    return {
+        "payment_id": str(payment.id),
+        "status": payment.status.value,
+        "amount": str(Decimal(payment.amount).quantize(_TWO_PLACES)),
+        "currency": payment.currency,
+    }
 
 
 async def create_payment(
-    db: AsyncSession, redis: Redis, idempotency_key: str, amount: float, currency: str
-) -> dict[str, Any]:
-    cached = await get_cached_response(redis, idempotency_key)
-    if cached:
-        payments_created_total.labels(status="idempotent_hit").inc()
-        return cast(dict[str, Any], cached.get("body", cached))
-
-    lock_acquired = await acquire_lock(redis, idempotency_key)
-    if not lock_acquired:
-        raise IdempotencyConflictError("Duplicate request in progress")
-
-    try:
-        payment = Payment(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    idempotency_key: str,
+    amount: Decimal,
+    currency: str,
+) -> HandlerResult:
+    """Business write for POST /v1/payments: the payment row and its outbox
+    event. Runs inside execute_idempotent's savepoint; no commit here."""
+    payment = Payment(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        idempotency_key=idempotency_key,
+        amount=amount,
+        currency=currency,
+        status=PaymentStatus.PENDING,
+        version=1,
+    )
+    db.add(payment)
+    db.add(
+        OutboxEvent(
             id=uuid.uuid4(),
-            idempotency_key=idempotency_key,
-            amount=amount,
-            currency=currency,
-            status=PaymentStatus.PENDING,
-            version=1,
-        )
-        db.add(payment)
-        outbox_event = OutboxEvent(
-            id=uuid.uuid4(),
+            tenant_id=tenant_id,
             event_type="payment.initiated",
             payload={
                 "payment_id": str(payment.id),
+                "tenant_id": str(tenant_id),
                 "amount": str(amount),
                 "currency": currency,
             },
         )
-        db.add(outbox_event)
-        await db.commit()
-        await db.refresh(payment)
-        response = {
-            "payment_id": str(payment.id),
-            "status": payment.status.value,
-            "amount": str(payment.amount),
-            "currency": payment.currency,
-        }
-        await cache_response(redis, idempotency_key, response, 202)
-        payments_created_total.labels(status="success").inc()
-        return response
+    )
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        if violates_constraint(exc, "uq_payments_tenant_idempotency_key"):
+            # The key row expired and was swept, but the payment it created is
+            # still here. Refuse rather than create a second payment.
+            raise BusinessRejection(
+                422,
+                {
+                    "detail": "Idempotency-Key was already used for a payment "
+                    "and has expired; use a new key"
+                },
+            ) from exc
+        raise
+    return HandlerResult(
+        status_code=202, body=payment_body(payment), resource_id=payment.id
+    )
 
-    except IntegrityError:
-        await db.rollback()
-        result = await db.execute(
-            select(Payment).where(Payment.idempotency_key == idempotency_key)
-        )
-        existing = result.scalar_one()
-        response = {
-            "payment_id": str(existing.id),
-            "status": existing.status.value,
-            "amount": str(existing.amount),
-            "currency": existing.currency,
-        }
-        await cache_response(redis, idempotency_key, response, 202)
-        payments_created_total.labels(status="conflict").inc()
-        return response
 
-    except Exception as e:
-        await db.rollback()
-        raise e
-
-    finally:
-        await release_lock(redis, idempotency_key)
+async def get_payment(
+    db: AsyncSession, *, tenant_id: uuid.UUID, payment_id: uuid.UUID
+) -> Payment | None:
+    result = await db.execute(
+        select(Payment).where(Payment.id == payment_id, Payment.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none()

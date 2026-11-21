@@ -1,145 +1,110 @@
 """
-Unit tests for app/services/idempotency.py
-Redis is mocked — no running infrastructure needed.
+Unit tests for app/services/idempotency.py (no database, no Redis).
+Transaction behaviour is tested against real Postgres in
+tests/integration/test_idempotency*.py.
 """
 
-import json
-from unittest.mock import AsyncMock
+import uuid
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.core.clock import FakeClock
+from app.core.exceptions import IdempotencyKeyMismatchError
 from app.services.idempotency import (
-    acquire_lock,
-    cache_response,
-    get_cached_response,
-    release_lock,
+    BusinessRejection,
+    HandlerResult,
+    ReplaySource,
+    execute_idempotent,
+    fingerprint,
 )
+from app.services.response_cache import StoredResponse
 
-# Fixtures
+TENANT = uuid.uuid4()
 
-
-@pytest.fixture
-def mock_redis() -> None:
-    redis = AsyncMock()
-    return redis
+# fingerprint
 
 
-# get_cached_response
+def test_fingerprint_is_stable_across_key_order_and_whitespace() -> None:
+    a = fingerprint("POST", "/v1/payments", {"amount": 10.5, "currency": "USD"})
+    b = fingerprint("post", "/v1/payments", {"currency": "USD", "amount": 10.5})
+    assert a == b
+    assert len(a) == 64
 
 
-@pytest.mark.asyncio
-async def test_get_cached_response_hit(mock_redis) -> None:
-    payload = {"payment_id": "abc-123", "status": "pending"}
-    mock_redis.get.return_value = json.dumps(payload).encode()
-
-    result = await get_cached_response(mock_redis, "key-1")
-
-    assert result is not None
-    assert result["payment_id"] == "abc-123"
-    mock_redis.get.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_get_cached_response_miss(mock_redis) -> None:
-    mock_redis.get.return_value = None
-
-    result = await get_cached_response(mock_redis, "key-missing")
-
-    assert result is None
+@pytest.mark.parametrize(
+    "method,path,body",
+    [
+        ("POST", "/v1/payments", {"amount": 10.51, "currency": "USD"}),
+        ("POST", "/v1/payments", {"amount": 10.5, "currency": "EUR"}),
+        ("POST", "/v1/refunds", {"amount": 10.5, "currency": "USD"}),
+        ("PUT", "/v1/payments", {"amount": 10.5, "currency": "USD"}),
+        ("POST", "/v1/payments", {"amount": 10.5, "currency": "USD", "x": 1}),
+    ],
+)
+def test_fingerprint_changes_with_any_value(method: str, path: str, body: Any) -> None:
+    base = fingerprint("POST", "/v1/payments", {"amount": 10.5, "currency": "USD"})
+    assert fingerprint(method, path, body) != base
 
 
-@pytest.mark.asyncio
-async def test_get_cached_response_uses_correct_key(mock_redis) -> None:
-    mock_redis.get.return_value = None
-    await get_cached_response(mock_redis, "my-idempotency-key")
-
-    call_args = mock_redis.get.call_args[0][0]
-    assert "my-idempotency-key" in call_args
+def test_fingerprint_handles_nested_bodies() -> None:
+    a = fingerprint("POST", "/p", {"meta": {"b": 1, "a": [1, 2]}})
+    b = fingerprint("POST", "/p", {"meta": {"a": [1, 2], "b": 1}})
+    assert a == b
+    assert a != fingerprint("POST", "/p", {"meta": {"a": [2, 1], "b": 1}})
 
 
-# cache_response
+def test_business_rejection_carries_response() -> None:
+    exc = BusinessRejection(422, {"detail": "insufficient funds"})
+    assert exc.status_code == 422
+    assert exc.body == {"detail": "insufficient funds"}
+    assert "insufficient funds" in str(exc)
 
 
-@pytest.mark.asyncio
-async def test_cache_response_calls_set(mock_redis) -> None:
-    await cache_response(mock_redis, "key-1", {"payment_id": "abc"}, 202)
-    mock_redis.set.assert_awaited_once()
+# execute_idempotent: cache paths never touch the database
 
 
-@pytest.mark.asyncio
-async def test_cache_response_uses_ttl(mock_redis) -> None:
-    await cache_response(mock_redis, "key-1", {"payment_id": "abc"}, 202, ttl=3600)
-
-    call_kwargs = mock_redis.set.call_args
-    # TTL should be passed as ex= keyword or as positional arg
-    assert call_kwargs is not None
+def _cache(hit: StoredResponse | None) -> MagicMock:
+    cache = MagicMock()
+    cache.get = AsyncMock(return_value=hit)
+    cache.put = AsyncMock()
+    return cache
 
 
-@pytest.mark.asyncio
-async def test_cache_response_stores_status_code(mock_redis) -> None:
-    body = {"payment_id": "xyz"}
-    await cache_response(mock_redis, "key-1", body, 202)
-
-    stored = mock_redis.set.call_args[0][1]
-    parsed = json.loads(stored)
-    assert parsed["status_code"] == 202
-    assert parsed["body"]["payment_id"] == "xyz"
-
-
-# acquire_lock
+async def _execute(db: Any, cache: Any, fp: str = "fp") -> Any:
+    handler = AsyncMock(return_value=HandlerResult(202, {}))
+    result = await execute_idempotent(
+        db,
+        cache,
+        tenant_id=TENANT,
+        key="k",
+        request_fingerprint=fp,
+        handler=handler,
+        clock=FakeClock(),
+        ttl_seconds=60,
+        lock_timeout_ms=100,
+    )
+    return result, handler
 
 
 @pytest.mark.asyncio
-async def test_acquire_lock_success(mock_redis) -> None:
-    mock_redis.setnx.return_value = 1  # lock acquired
+async def test_cache_hit_with_matching_fingerprint_replays_without_db() -> None:
+    db = AsyncMock()
+    hit = StoredResponse(202, {"payment_id": "p1"}, "fp")
+    result, handler = await _execute(db, _cache(hit))
 
-    result = await acquire_lock(mock_redis, "key-1")
-
-    assert result is True
-    mock_redis.expire.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_acquire_lock_already_held(mock_redis) -> None:
-    mock_redis.setnx.return_value = 0  # lock already held
-
-    result = await acquire_lock(mock_redis, "key-1")
-
-    assert result is False
+    assert result.source is ReplaySource.CACHE
+    assert result.replayed
+    assert result.response.body == {"payment_id": "p1"}
+    handler.assert_not_awaited()
+    db.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_acquire_lock_key_pattern(mock_redis) -> None:
-    mock_redis.setnx.return_value = 1
-    await acquire_lock(mock_redis, "my-key")
-
-    lock_key = mock_redis.setnx.call_args[0][0]
-    assert "my-key" in lock_key
-    assert "lock" in lock_key
-
-
-@pytest.mark.asyncio
-async def test_acquire_lock_sets_expiry(mock_redis) -> None:
-    mock_redis.setnx.return_value = 1
-    await acquire_lock(mock_redis, "key-1", ttl=30)
-
-    mock_redis.expire.assert_awaited_once()
-    expire_args = mock_redis.expire.call_args[0]
-    assert 30 in expire_args
-
-
-# release_lock
-
-
-@pytest.mark.asyncio
-async def test_release_lock_calls_delete(mock_redis) -> None:
-    await release_lock(mock_redis, "key-1")
-    mock_redis.delete.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_release_lock_key_pattern(mock_redis) -> None:
-    await release_lock(mock_redis, "my-key")
-    deleted_key = mock_redis.delete.call_args[0][0]
-    assert "my-key" in deleted_key
-    assert "lock" in deleted_key
+async def test_cache_hit_with_different_fingerprint_is_422() -> None:
+    db = AsyncMock()
+    hit = StoredResponse(202, {"payment_id": "p1"}, "other")
+    with pytest.raises(IdempotencyKeyMismatchError):
+        await _execute(db, _cache(hit))
+    db.execute.assert_not_awaited()

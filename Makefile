@@ -7,7 +7,8 @@
 .PHONY: help dev down logs logs-app logs-worker shell test test-unit \
         test-integration test-cov migrate migrate-down migrate-status \
         check-infra load-test load-test-ui lint lint-fix typecheck fmt \
-        clean clean-cache verify verify-quick verify-faults bench recon demo
+        clean clean-cache verify verify-quick verify-faults bench recon demo \
+        tenant api-key load-test-redis-kill
 
 # Default target — print available commands
 help:
@@ -99,7 +100,8 @@ test-cov: ## Run tests with HTML coverage report (opens in browser)
 # Load testing
 # -----------------------------------------------------------------------------
 
-load-test: ## Run Locust load test in headless mode (50 users, 60s)
+load-test: ## Run Locust load test headless (50 users, 60s); needs IPPS_API_KEY
+	@test -n "$$IPPS_API_KEY" || (echo "export IPPS_API_KEY first (make tenant NAME=loadtest)"; exit 1)
 	poetry run locust \
 		-f tests/load/locustfile.py \
 		--host http://localhost:8000 \
@@ -108,6 +110,9 @@ load-test: ## Run Locust load test in headless mode (50 users, 60s)
 		--run-time 60s \
 		--headless \
 		--print-stats
+
+load-test-redis-kill: ## Stage 1 gate: Locust with Redis stopped mid-run; needs IPPS_API_KEY
+	tests/load/redis_kill.sh
 
 load-test-ui: ## Start Locust with browser UI at http://localhost:8089
 	poetry run locust \
@@ -129,6 +134,18 @@ typecheck: ## Run mypy type checker
 
 fmt: ## Format code with ruff formatter
 	poetry run ruff format .
+
+# -----------------------------------------------------------------------------
+# Tenants and API keys (keys are printed once; only their hash is stored)
+# -----------------------------------------------------------------------------
+
+tenant: ## Create a tenant and its first API key: make tenant NAME=acme
+	@test -n "$(NAME)" || (echo "usage: make tenant NAME=<name>"; exit 1)
+	docker compose exec api .venv/bin/python -m app.cli create-tenant --name "$(NAME)"
+
+api-key: ## Add an API key to a tenant: make api-key TENANT=<uuid|default>
+	@test -n "$(TENANT)" || (echo "usage: make api-key TENANT=<uuid|default>"; exit 1)
+	docker compose exec api .venv/bin/python -m app.cli create-api-key --tenant-id "$(TENANT)"
 
 # -----------------------------------------------------------------------------
 # v2 placeholders — implemented in the stage noted. They fail on purpose so

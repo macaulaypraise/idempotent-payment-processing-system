@@ -1,11 +1,17 @@
+import uuid
 from typing import cast
 
-from fastapi import Depends, Request
+from fastapi import Depends, Header, Request
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.core.database import get_db
+from app.core.exceptions import IdempotencyKeyMissingError, UnauthorizedError
+from app.core.security import hash_api_key, parse_bearer_token
+from app.models.tenant import ApiKey
+from app.services.response_cache import ResponseCache
 
 
 def get_settings_dep(settings: Settings = Depends(get_settings)) -> Settings:
@@ -18,3 +24,45 @@ async def get_db_dep(db: AsyncSession = Depends(get_db)) -> AsyncSession:
 
 async def get_redis(request: Request) -> Redis:
     return cast(Redis, request.app.state.redis)
+
+
+async def get_response_cache(request: Request) -> ResponseCache:
+    return cast(ResponseCache, request.app.state.response_cache)
+
+
+async def get_current_tenant(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db_dep),
+) -> uuid.UUID:
+    """Resolve `Authorization: Bearer <api key>` to a tenant id, or 401."""
+    token = parse_bearer_token(authorization)
+    if token is None:
+        raise UnauthorizedError()
+    tenant_id = (
+        await db.execute(
+            select(ApiKey.tenant_id).where(
+                ApiKey.key_hash == hash_api_key(token), ApiKey.revoked_at.is_(None)
+            )
+        )
+    ).scalar_one_or_none()
+    # End the read-only transaction so the request's write transaction starts
+    # fresh (SET LOCAL lock_timeout must be inside that transaction).
+    await db.rollback()
+    if tenant_id is None:
+        raise UnauthorizedError()
+    return cast(uuid.UUID, tenant_id)
+
+
+async def require_idempotency_key(
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    settings: Settings = Depends(get_settings_dep),
+) -> str:
+    if idempotency_key is None or not idempotency_key.strip():
+        raise IdempotencyKeyMissingError()
+    key = idempotency_key.strip()
+    if len(key) > settings.IDEMPOTENCY_KEY_MAX_LENGTH:
+        raise IdempotencyKeyMissingError(
+            f"Idempotency-Key must be at most {settings.IDEMPOTENCY_KEY_MAX_LENGTH} "
+            "characters"
+        )
+    return key

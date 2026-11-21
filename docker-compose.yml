@@ -215,6 +215,19 @@ services:
       mock-payment-provider:
         condition: service_healthy
 
+  # Deletes idempotency key rows past their 24 h expiry.
+  idempotency_expiry:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    command: .venv/bin/python -m app.workers.idempotency_expiry
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   postgres-data:
     driver: local

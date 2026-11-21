@@ -57,7 +57,8 @@ def test_settings_has_default_for_lock_ttl() -> None:
     from app.config import Settings
 
     s = Settings()
-    assert s.IDEMPOTENCY_LOCK_TTL_SECONDS > 0
+    assert 0 < s.IDEMPOTENCY_LOCK_TIMEOUT_MS < 10_000
+    assert s.DB_ECHO is False
 
 
 def test_settings_has_default_for_max_retries() -> None:

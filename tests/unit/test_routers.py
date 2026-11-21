@@ -1,199 +1,242 @@
 """
-Unit tests for app/routers/payments.py and app/routers/webhooks.py
-Uses httpx.AsyncClient with the FastAPI app — no running server needed.
-All services are patched at the router boundary.
+Unit tests for app/routers (services patched, no database).
+HTTP behaviour against a real database is in tests/integration.
 """
 
 import uuid
-from datetime import UTC
+from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-# App & Dependency Fixtures
+from app.core.exceptions import IdempotencyConflictError, IdempotencyKeyMismatchError
+from app.models.payment import Payment, PaymentStatus
+from app.services.idempotency import IdempotentResult, ReplaySource
+from app.services.response_cache import StoredResponse
+
+TENANT = uuid.uuid4()
+BODY = {"amount": 50.00, "currency": "USD"}
+AUTH = {"Authorization": "Bearer ipps_test"}
 
 
 @pytest.fixture
-def mock_db():
-    """Provides a fresh AsyncMock for the database per test."""
-    return AsyncMock()
-
-
-@pytest.fixture
-def mock_redis():
-    """Provides a fresh AsyncMock for Redis per test."""
-    redis = AsyncMock()
-    # Provide default safe returns to prevent json.loads() crashes
-    redis.get.return_value = None
-    redis.setnx.return_value = 1
-    return redis
-
-
-@pytest.fixture
-def app(mock_db, mock_redis):
-    from app.dependencies import get_db_dep, get_redis
+def app() -> Any:
+    from app.dependencies import (
+        get_current_tenant,
+        get_db_dep,
+        get_response_cache,
+    )
     from app.main import app as fastapi_app
 
-    # Inject mock state and override FastAPI dependencies
-    fastapi_app.state.redis = mock_redis
-
-    fastapi_app.dependency_overrides[get_redis] = lambda: mock_redis
-    fastapi_app.dependency_overrides[get_db_dep] = lambda: mock_db
-    return fastapi_app
+    fastapi_app.dependency_overrides[get_db_dep] = lambda: AsyncMock()
+    fastapi_app.dependency_overrides[get_response_cache] = lambda: MagicMock()
+    fastapi_app.dependency_overrides[get_current_tenant] = lambda: TENANT
+    fastapi_app.state.redis = AsyncMock()
+    yield fastapi_app
+    fastapi_app.dependency_overrides.clear()
 
 
 @pytest_asyncio.fixture
-async def client(app) -> None:
+async def client(app: Any) -> AsyncGenerator[AsyncClient, None]:
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as ac:
         yield ac
 
 
-# POST /payments
+def _result(source: ReplaySource, status: int = 202) -> IdempotentResult:
+    return IdempotentResult(
+        StoredResponse(status, {"payment_id": "pay-abc", "status": "pending"}, "fp"),
+        source,
+    )
+
+
+def _post(client: AsyncClient, key: str | None = "k1", body: Any = BODY) -> Any:
+    headers = dict(AUTH)
+    if key is not None:
+        headers["Idempotency-Key"] = key
+    return client.post("/v1/payments", json=body, headers=headers)
+
+
+# POST /v1/payments
 
 
 @pytest.mark.asyncio
-async def test_create_payment_returns_202(client) -> None:
-    response_body = {
-        "payment_id": "pay-abc",
-        "status": "pending",
-        "amount": "50.00",
-        "currency": "USD",
-    }
+async def test_create_payment_returns_stored_status_and_body(
+    client: AsyncClient,
+) -> None:
     with patch(
-        "app.routers.payments.create_payment", new=AsyncMock(return_value=response_body)
+        "app.routers.payments.execute_idempotent",
+        new=AsyncMock(return_value=_result(ReplaySource.NONE)),
     ):
-        resp = await client.post(
-            "/payments",
-            json={"amount": 50.00, "currency": "USD"},
-            headers={"Idempotency-Key": str(uuid.uuid4())},
-        )
-
+        resp = await _post(client)
     assert resp.status_code == 202
     assert resp.json()["payment_id"] == "pay-abc"
+    assert "Idempotent-Replayed" not in resp.headers
 
 
 @pytest.mark.asyncio
-async def test_create_payment_missing_idempotency_key_returns_422(client) -> None:
-    resp = await client.post("/payments", json={"amount": 50.00, "currency": "USD"})
-    assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_create_payment_missing_amount_returns_422(client) -> None:
-    resp = await client.post(
-        "/payments",
-        json={"currency": "USD"},
-        headers={"Idempotency-Key": str(uuid.uuid4())},
-    )
-    assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_create_payment_negative_amount_returns_422(client) -> None:
-    resp = await client.post(
-        "/payments",
-        json={"amount": -10.00, "currency": "USD"},
-        headers={"Idempotency-Key": str(uuid.uuid4())},
-    )
-    assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_create_payment_conflict_returns_409(client) -> None:
+@pytest.mark.parametrize("source", [ReplaySource.DATABASE, ReplaySource.CACHE])
+async def test_replay_sets_header(client: AsyncClient, source: ReplaySource) -> None:
     with patch(
-        "app.routers.payments.create_payment", new=AsyncMock(side_effect=ValueError())
+        "app.routers.payments.execute_idempotent",
+        new=AsyncMock(return_value=_result(source)),
     ):
-        resp = await client.post(
-            "/payments",
-            json={"amount": 50.00, "currency": "USD"},
-            headers={"Idempotency-Key": str(uuid.uuid4())},
-        )
+        resp = await _post(client)
+    assert resp.headers["Idempotent-Replayed"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_stored_rejection_is_returned_verbatim(client: AsyncClient) -> None:
+    with patch(
+        "app.routers.payments.execute_idempotent",
+        new=AsyncMock(return_value=_result(ReplaySource.NONE, status=422)),
+    ):
+        resp = await _post(client)
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_missing_idempotency_key_returns_400(client: AsyncClient) -> None:
+    resp = await _post(client, key=None)
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_blank_idempotency_key_returns_400(client: AsyncClient) -> None:
+    resp = await _post(client, key="   ")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"currency": "USD"},
+        {"amount": -10.00, "currency": "USD"},
+        {"amount": 0, "currency": "USD"},
+        {"amount": 10.001, "currency": "USD"},
+        {"amount": 10.00, "currency": "usd"},
+        {"amount": 10.00, "currency": "US"},
+    ],
+)
+async def test_invalid_body_returns_422(client: AsyncClient, body: Any) -> None:
+    resp = await _post(client, body=body)
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_conflict_returns_409_with_retry_after(client: AsyncClient) -> None:
+    with patch(
+        "app.routers.payments.execute_idempotent",
+        new=AsyncMock(side_effect=IdempotencyConflictError()),
+    ):
+        resp = await _post(client)
     assert resp.status_code == 409
-
-
-# GET /payments/{id}
-
-
-@pytest.mark.asyncio
-async def test_get_payment_returns_200(client, mock_db) -> None:
-    from datetime import datetime
-    from unittest.mock import MagicMock
-
-    from app.models.payment import PaymentStatus
-
-    mock_payment = MagicMock()
-    mock_payment.id = "pay-abc"
-    mock_payment.status = PaymentStatus.SETTLED
-    mock_payment.amount = Decimal("50.00")
-    mock_payment.currency = "USD"
-    mock_payment.created_at = datetime.now(UTC)
-    mock_payment.updated_at = datetime.now(UTC)
-
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none.return_value = mock_payment
-    mock_db.execute.return_value = mock_result
-
-    test_id = str(uuid.uuid4())
-    resp = await client.get(f"/payments/{test_id}")
-
-    assert resp.status_code == 200
+    assert resp.headers["Retry-After"] == "1"
 
 
 @pytest.mark.asyncio
-async def test_get_payment_not_found_returns_404(client, mock_db) -> None:
-    from unittest.mock import MagicMock
+async def test_mismatch_returns_422(client: AsyncClient) -> None:
+    with patch(
+        "app.routers.payments.execute_idempotent",
+        new=AsyncMock(side_effect=IdempotencyKeyMismatchError()),
+    ):
+        resp = await _post(client)
+    assert resp.status_code == 422
 
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none.return_value = None
-    mock_db.execute.return_value = mock_result
 
-    test_id = str(uuid.uuid4())
-    resp = await client.get(f"/payments/{test_id}")
+@pytest.mark.asyncio
+async def test_unauthenticated_request_returns_401(app: Any) -> None:
+    from app.dependencies import get_current_tenant
 
+    del app.dependency_overrides[get_current_tenant]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
+        resp = await c.post("/v1/payments", json=BODY, headers={"Idempotency-Key": "k"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_unversioned_path_is_gone(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/payments", json=BODY, headers={**AUTH, "Idempotency-Key": "k"}
+    )
     assert resp.status_code == 404
+
+
+# GET /v1/payments/{id}
+
+
+@pytest.mark.asyncio
+async def test_get_payment_returns_200(client: AsyncClient) -> None:
+    payment = Payment(
+        id=uuid.uuid4(),
+        tenant_id=TENANT,
+        idempotency_key="k",
+        amount=Decimal("50.00"),
+        currency="USD",
+        status=PaymentStatus.SETTLED,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    with patch(
+        "app.routers.payments.get_payment", new=AsyncMock(return_value=payment)
+    ) as get:
+        resp = await client.get(f"/v1/payments/{payment.id}", headers=AUTH)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "settled"
+    assert get.call_args.kwargs["tenant_id"] == TENANT
+
+
+@pytest.mark.asyncio
+async def test_get_payment_not_found_returns_404(client: AsyncClient) -> None:
+    with patch("app.routers.payments.get_payment", new=AsyncMock(return_value=None)):
+        resp = await client.get(f"/v1/payments/{uuid.uuid4()}", headers=AUTH)
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_payment_with_malformed_id_returns_422(client: AsyncClient) -> None:
+    resp = await client.get("/v1/payments/not-a-uuid", headers=AUTH)
+    assert resp.status_code == 422
 
 
 # GET /health
 
 
 @pytest.mark.asyncio
-async def test_health_returns_200(client) -> None:
-    # Patch the engine and Kafka clients
+async def test_health_returns_200(client: AsyncClient) -> None:
     with (
         patch("app.routers.health.engine") as mock_engine,
         patch("app.routers.health.AIOKafkaAdminClient") as mock_kafka_cls,
     ):
-        # 1. AsyncMock automatically handles the `async with engine.connect()` context
         mock_engine.connect.return_value = AsyncMock()
-
-        # 2. Mock the Kafka instance so `await admin.start()` is a valid coroutine
         mock_kafka_cls.return_value = AsyncMock()
-
         resp = await client.get("/health")
-
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
 
 
-# POST /webhooks
+# POST /v1/webhooks (placeholder until Stage 5)
 
 
 @pytest.mark.asyncio
-async def test_webhook_settled_returns_200(client) -> None:
+async def test_webhook_settled_returns_200(client: AsyncClient) -> None:
     resp = await client.post(
-        "/webhooks",
-        json={"transaction_id": "ref-123", "status": "settled"},
+        "/v1/webhooks", json={"transaction_id": "ref-123", "status": "settled"}
     )
     assert resp.status_code == 200
     assert resp.json()["received"] is True
 
 
 @pytest.mark.asyncio
-async def test_webhook_invalid_body_returns_422(client) -> None:
-    resp = await client.post("/webhooks", json={})
+async def test_webhook_invalid_body_returns_422(client: AsyncClient) -> None:
+    resp = await client.post("/v1/webhooks", json={})
     assert resp.status_code == 422

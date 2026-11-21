@@ -68,3 +68,41 @@ def test_payment_status_is_string_or_enum() -> None:
     cols = {c.key: c for c in Payment.__mapper__.columns}
     status_col = cols["status"]
     assert status_col is not None
+
+
+def test_tenant_scoped_tables_have_non_null_tenant_id() -> None:
+    from app.models import OutboxEvent, Payment, ProcessedEvent
+
+    for model in (Payment, OutboxEvent, ProcessedEvent):
+        col = model.__table__.c.tenant_id
+        assert col.nullable is False, model.__name__
+        assert {fk.column.table.name for fk in col.foreign_keys} == {"tenants"}
+
+
+def test_payment_idempotency_key_is_unique_per_tenant_not_globally() -> None:
+    from sqlalchemy import UniqueConstraint
+
+    from app.models import Payment
+
+    assert Payment.__table__.c.idempotency_key.unique is not True
+    uniques = [
+        tuple(c.name for c in con.columns)
+        for con in Payment.__table__.constraints
+        if isinstance(con, UniqueConstraint)
+    ]
+    assert ("tenant_id", "idempotency_key") in uniques
+
+
+def test_idempotency_key_primary_key_is_tenant_and_key() -> None:
+    from app.models import IdempotencyKey
+
+    pk = [c.name for c in IdempotencyKey.__table__.primary_key.columns]
+    assert pk == ["tenant_id", "key"]
+
+
+def test_api_key_stores_hash_not_plaintext() -> None:
+    from app.models import ApiKey
+
+    cols = set(ApiKey.__table__.c.keys())
+    assert "key_hash" in cols
+    assert not {"key", "plaintext", "secret"} & cols

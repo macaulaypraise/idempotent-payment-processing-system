@@ -6,6 +6,7 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import app.models  # noqa: F401  (registers every table on Base.metadata)
 from app.config import get_settings
 from app.core.database import Base
 
@@ -32,6 +33,13 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+def _database_url() -> str:
+    """Programmatic callers (the test suite) pass the URL explicitly;
+    the CLI uses DATABASE_URL from the environment."""
+    url = config.attributes.get("database_url")
+    return str(url) if url else settings.DATABASE_URL
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -44,7 +52,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = settings.DATABASE_URL
+    url = _database_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -66,7 +74,7 @@ def do_run_migrations(connection: Any) -> None:
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode using async engine."""
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = settings.DATABASE_URL
+    configuration["sqlalchemy.url"] = _database_url()
 
     connectable = async_engine_from_config(
         configuration,

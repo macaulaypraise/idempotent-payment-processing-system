@@ -4,7 +4,21 @@ from prometheus_client import Counter, Gauge
 payments_created_total = Counter(
     "payments_created_total",
     "Total number of payment creation attempts",
-    ["status"],  # labels: success, idempotent_hit, conflict
+    # success: new payment; idempotent_hit: replayed from Postgres;
+    # cache_hit: replayed from Redis; mismatch: 422; conflict: 409 lock timeout;
+    # rejected: deterministic business rejection stored under the key
+    ["status"],
+)
+
+# Redis is optional; count how often it fails so a silent outage is visible
+cache_errors_total = Counter(
+    "idempotency_cache_errors_total",
+    "Redis errors on the idempotency cache path (request continues without cache)",
+    ["operation"],
+)
+
+idempotency_keys_expired_total = Counter(
+    "idempotency_keys_expired_total", "Idempotency key rows deleted after expiry"
 )
 
 # outbox_lag_seconds tracks age of oldest unpublished outbox event

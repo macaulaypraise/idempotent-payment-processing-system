@@ -2,7 +2,16 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import UUID, DateTime, Enum, Integer, Numeric, String
+from sqlalchemy import (
+    UUID,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import mapped_column
 
 from app.core.database import Base
@@ -20,7 +29,13 @@ class Payment(Base):
     __tablename__ = "payments"
 
     id = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    idempotency_key = mapped_column(String, unique=True, nullable=False)
+    tenant_id = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
+    )
+    # Kept unique per tenant as a second line of defence behind
+    # idempotency_keys: even a bug in the idempotency flow cannot create two
+    # payments for one key.
+    idempotency_key = mapped_column(String, nullable=False)
     amount = mapped_column(Numeric(precision=12, scale=2), nullable=False)
     currency = mapped_column(String(3), nullable=False)
     version = mapped_column(Integer, nullable=False, default=1)
@@ -35,4 +50,10 @@ class Payment(Base):
     )
     created_at = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "idempotency_key", name="uq_payments_tenant_idempotency_key"
+        ),
     )

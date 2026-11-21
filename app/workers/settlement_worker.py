@@ -71,7 +71,9 @@ async def process_message(
         validate_transition(payment.status, PaymentStatus.SETTLED)
         payment.status = PaymentStatus.SETTLED
         processed = ProcessedEvent(
-            event_id=event_id, consumer_group="settlement-worker"
+            event_id=event_id,
+            consumer_group="settlement-worker",
+            tenant_id=payment.tenant_id,
         )
         db.add(processed)
         await db.commit()

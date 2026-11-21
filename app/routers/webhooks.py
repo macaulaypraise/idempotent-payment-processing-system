@@ -3,7 +3,9 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-router = APIRouter()
+# Unauthenticated placeholder; Stage 5 replaces it with a signed inbox at
+# POST /v1/webhooks/psp.
+router = APIRouter(prefix="/v1")
 
 
 class WebhookPayload(BaseModel):

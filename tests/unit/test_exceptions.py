@@ -42,3 +42,19 @@ def test_each_exception_has_distinct_type() -> None:
         BackpressureError,
     }
     assert len(types) == 4
+
+
+def test_new_idempotency_errors_have_contract_status_codes() -> None:
+    from app.core.exceptions import (
+        IdempotencyKeyMismatchError,
+        IdempotencyKeyMissingError,
+        UnauthorizedError,
+    )
+
+    assert IdempotencyKeyMissingError().status_code == 400
+    assert IdempotencyKeyMismatchError().status_code == 422
+    assert UnauthorizedError().status_code == 401
+    assert UnauthorizedError().headers == {"WWW-Authenticate": "Bearer"}
+    conflict = IdempotencyConflictError()
+    assert conflict.status_code == 409
+    assert conflict.headers == {"Retry-After": "1"}
