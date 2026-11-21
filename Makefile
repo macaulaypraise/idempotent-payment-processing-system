@@ -148,18 +148,19 @@ api-key: ## Add an API key to a tenant: make api-key TENANT=<uuid|default>
 	docker compose exec api .venv/bin/python -m app.cli create-api-key --tenant-id "$(TENANT)"
 
 # -----------------------------------------------------------------------------
-# v2 placeholders — implemented in the stage noted. They fail on purpose so
-# nothing can report a green "verify" before the harness exists.
+# Verification harness (docs/verification.md). Needs Postgres + Redis, like
+# `make test`. VERIFY_EXAMPLES overrides the number of histories.
 # -----------------------------------------------------------------------------
 
-verify: ## [Stage 7] Full verification run: state machine + fault scenarios + checker
-	@echo "make verify: not implemented yet (Stage 7)"; exit 1
+verify-quick: ## State machine, short derandomized profile (~20 histories) + self-test, as PR CI
+	VERIFY_PROFILE=pr LOG_LEVEL=ERROR poetry run pytest tests/verification -s --no-cov -p no:cacheprovider
 
-verify-quick: ## [Stage 7] Short deterministic verification profile (PR CI)
-	@echo "make verify-quick: not implemented yet (Stage 7)"; exit 1
+verify: ## State machine, nightly profile (300 random histories) + self-test; histories in .verify/
+	VERIFY_PROFILE=nightly VERIFY_HISTORY_DIR=.verify LOG_LEVEL=ERROR \
+		poetry run pytest tests/verification -s --no-cov
 
-verify-faults: ## [Stage 7] Toxiproxy fault-injection scenarios
-	@echo "make verify-faults: not implemented yet (Stage 7)"; exit 1
+verify-faults: ## [Stage 7 part 2] Toxiproxy fault-injection scenarios
+	@echo "make verify-faults: arrives with Stage 7 part 2"; exit 1
 
 bench: ## [Stage 8] Headless Locust benchmark with CSV output
 	@echo "make bench: not implemented yet (Stage 8)"; exit 1

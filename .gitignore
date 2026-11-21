@@ -48,3 +48,6 @@ Thumbs.db
 *:Zone.Identifier
 *Zone.Identifier
 tests/load/results/
+
+# verification harness output (histories of the last run)
+.verify/

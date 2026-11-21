@@ -17,6 +17,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from verification.database import CLEAN_SQL
+
 load_dotenv(".env.test")
 TEST_DATABASE_URL: str = os.environ.get("TEST_DATABASE_URL", "")
 TEST_REDIS_URL: str = os.environ.get("TEST_REDIS_URL", "")
@@ -29,18 +31,7 @@ DEFAULT_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 # the dev stack's role keeps the two from overwriting each other's password.
 TEST_APP_ROLE = "ipps_app_test"
 TEST_APP_PASSWORD = "ipps_app_test"
-_CLEAN_SQL = (
-    # Ledger tables are append-only even for the owner; replica mode skips the
-    # immutability triggers so tests can start clean (owner is a superuser in
-    # docker-compose and CI).
-    "SET session_replication_role = replica",
-    "TRUNCATE TABLE refunds, entries, transfers, payments, wallets, accounts, "
-    "idempotency_keys, api_keys, outbox_events, processed_events, webhook_events, "
-    "recon_items, recon_runs, settlement_lines "
-    "RESTART IDENTITY CASCADE",
-    f"DELETE FROM tenants WHERE id <> '{DEFAULT_TENANT_ID}'",
-    "SET session_replication_role = DEFAULT",
-)
+_CLEAN_SQL = CLEAN_SQL
 
 
 def app_role_url(owner_url: str) -> str:

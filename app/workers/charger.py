@@ -47,6 +47,7 @@ from app.core.backoff import equal_jitter
 from app.core.clock import Clock, SystemClock
 from app.core.failpoints import failpoint
 from app.core.metrics import charger_attempts_total, dlq_depth
+from app.core.planted_bugs import planted
 from app.models.outbox_event import OutboxEvent
 from app.models.payment import Payment, PaymentStatus
 from app.models.processed_event import ProcessedEvent
@@ -104,6 +105,15 @@ class Claim:
     charge_id: str | None = None  # refunds: the provider charge to refund
 
 
+def provider_key(claim: Claim) -> str:
+    """The provider idempotency key: the payment or refund id, the same on
+    every attempt, so a retry after a lost response replays instead of
+    charging again."""
+    if planted("fresh_provider_key"):  # the harness's self-test; never in prod
+        return f"{claim.id}:{claim.attempts}"
+    return str(claim.id)
+
+
 @dataclass
 class Charger:
     session_factory: async_sessionmaker[AsyncSession]
@@ -156,7 +166,7 @@ class Charger:
         try:
             if claim.kind == "payment":
                 result = await self.psp.charge(
-                    key=str(claim.id),
+                    key=provider_key(claim),
                     amount=claim.amount,
                     currency=claim.currency,
                     merchant_reference=str(claim.id),
@@ -164,7 +174,7 @@ class Charger:
             else:
                 assert claim.charge_id is not None
                 result = await self.psp.refund(
-                    key=str(claim.id),
+                    key=provider_key(claim),
                     charge_id=claim.charge_id,
                     amount=claim.amount,
                     merchant_reference=str(claim.id),
@@ -411,7 +421,7 @@ class Charger:
 
 
 def decode(
-    topic: str, value: str, headers: list[tuple[str, bytes]] | None
+    topic: str, value: str | bytes, headers: list[tuple[str, bytes]] | None
 ) -> ChargerEvent:
     meta = {k: v.decode() for k, v in (headers or [])}
     payload = json.loads(value)

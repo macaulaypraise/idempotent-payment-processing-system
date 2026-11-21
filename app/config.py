@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # for date D reports captures from D - window that no file mentioned.
     RECON_PROVIDER: str = "psp"
     RECON_SETTLEMENT_WINDOW_DAYS: int = 1
+    # Deliberate bugs for the verification harness's self-test
+    # (app/core/planted_bugs.py). Comma-separated; ignored in production.
+    HARNESS_PLANTED_BUGS: str = ""
     # Crash points for testing, e.g. "charger.after_provider_call=exit".
     # Ignored when APP_ENV=production.
     FAILPOINTS: str = ""

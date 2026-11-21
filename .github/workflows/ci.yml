@@ -67,6 +67,9 @@ jobs:
       OUTBOX_IDLE_SLEEP_SECONDS: 2
 
       LOG_LEVEL: WARNING
+      # The verification state machine (tests/verification) runs its short,
+      # derandomized profile here; the nightly workflow runs the long one.
+      VERIFY_PROFILE: pr
       SERVICE_NAME: ipps-payment-api
       METRICS_PATH: /metrics
 

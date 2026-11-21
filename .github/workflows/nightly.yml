@@ -1,0 +1,88 @@
+name: Nightly verification
+
+# The long, randomized state-machine profile and the harness self-test.
+# A failure uploads the failing history; the summary records the numbers
+# the README quotes (docs/verification.md).
+on:
+  schedule:
+    - cron: "17 2 * * *" # 02:17 UTC
+  workflow_dispatch:
+    inputs:
+      examples:
+        description: "Histories to generate"
+        default: "300"
+
+jobs:
+  verify:
+    name: State machine (nightly profile) + self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 5
+      postgres:
+        image: postgres:16
+        ports: ["5432:5432"]
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: payments_test
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/payments_test
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/payments_test
+      TEST_REDIS_URL: redis://localhost:6379/0
+      REDIS_URL: redis://localhost:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+      LOG_LEVEL: ERROR
+      VERIFY_PROFILE: nightly
+      VERIFY_EXAMPLES: ${{ github.event.inputs.examples || '300' }}
+      VERIFY_HISTORY_DIR: .verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install poetry
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+      # Past failures are replayed first: Hypothesis keeps them here
+      - name: Cache Hypothesis example database
+        uses: actions/cache@v4
+        with:
+          path: .hypothesis
+          key: hypothesis-${{ github.run_id }}
+          restore-keys: hypothesis-
+      - run: poetry install --no-interaction
+      - name: Run the harness
+        run: |
+          set -o pipefail
+          poetry run pytest tests/verification -s --no-cov 2>&1 | tee verify.log
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Nightly verification"
+            echo '```'
+            grep -E '^harness:|^  |planted bug|passed|failed' verify.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the failing history
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-history-${{ github.run_id }}
+          path: |
+            .verify/
+            verify.log
+          retention-days: 14
