@@ -9,6 +9,8 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
+    Integer,
     String,
     UniqueConstraint,
 )
@@ -18,10 +20,20 @@ from app.core.database import Base
 
 
 class PaymentStatus(enum.Enum):
+    """Stored by name (PENDING ...), shown in the API by value (pending ...).
+
+    PENDING -> PROCESSING -> CAPTURED -> SETTLED
+                         \\-> FAILED (terminal)
+    CAPTURED | SETTLED -> REFUNDED
+
+    The database enforces the same transitions (trigger payments_guard).
+    """
+
     PENDING = "pending"
     PROCESSING = "processing"
-    SETTLED = "settled"
+    CAPTURED = "captured"
     FAILED = "failed"
+    SETTLED = "settled"
     REFUNDED = "refunded"
 
 
@@ -39,8 +51,24 @@ class Payment(Base):
     amount = mapped_column(BigInteger, nullable=False)  # minor units (cents, kobo)
     currency = mapped_column(String(3), nullable=False)
     status = mapped_column(
-        Enum(PaymentStatus), nullable=False, default=PaymentStatus.PENDING
+        Enum(
+            PaymentStatus,
+            native_enum=False,
+            create_constraint=False,  # ck_payments_status below
+            length=16,
+        ),
+        nullable=False,
+        default=PaymentStatus.PENDING,
     )
+    # The wallet a capture credits. NULL only for payments created before v2
+    # Stage 3, which have no ledger postings.
+    wallet_id = mapped_column(
+        UUID(as_uuid=True), ForeignKey("wallets.id"), nullable=True
+    )
+    psp_reference = mapped_column(String(128), nullable=True)
+    attempts = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    next_attempt_at = mapped_column(DateTime(timezone=True), nullable=True)
+    settled_at = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -53,7 +81,13 @@ class Payment(Base):
 
     __table_args__ = (
         CheckConstraint("amount > 0", name="ck_payments_amount_positive"),
+        CheckConstraint(
+            "status IN ('PENDING', 'PROCESSING', 'CAPTURED', 'FAILED', "
+            "'SETTLED', 'REFUNDED')",
+            name="ck_payments_status",
+        ),
         UniqueConstraint(
             "tenant_id", "idempotency_key", name="uq_payments_tenant_idempotency_key"
         ),
+        Index("ix_payments_wallet_id", "wallet_id"),
     )

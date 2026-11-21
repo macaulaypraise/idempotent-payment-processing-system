@@ -19,7 +19,7 @@ from app.services.idempotency import IdempotentResult, ReplaySource
 from app.services.response_cache import StoredResponse
 
 TENANT = uuid.uuid4()
-BODY = {"amount": 5000, "currency": "USD"}
+BODY = {"amount": 5000, "currency": "USD", "wallet_id": str(uuid.uuid4())}
 AUTH = {"Authorization": "Bearer ipps_test"}
 
 
@@ -116,7 +116,8 @@ async def test_blank_idempotency_key_returns_400(client: AsyncClient) -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        {"currency": "USD"},
+        {"currency": "USD", "wallet_id": str(uuid.uuid4())},
+        {"amount": 1000, "currency": "USD"},  # wallet_id is required
         {"amount": -1000, "currency": "USD"},
         {"amount": 0, "currency": "USD"},
         {"amount": 10.5, "currency": "USD"},  # floats are rejected outright

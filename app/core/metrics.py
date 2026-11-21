@@ -40,3 +40,10 @@ idempotent_requests_total = Counter(
 ledger_transfers_total = Counter(
     "ledger_transfers_total", "Ledger transfers posted", ["kind"]
 )
+
+# Provider outcomes by who reported them and whether they changed anything
+psp_results_total = Counter(
+    "psp_results_total",
+    "Provider outcomes applied to payments and refunds",
+    ["source", "outcome", "result"],
+)

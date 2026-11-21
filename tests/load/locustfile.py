@@ -27,8 +27,24 @@ def _headers(key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {API_KEY}", "Idempotency-Key": key}
 
 
-def _body() -> dict[str, Any]:
-    return {"amount": random.randint(100, 50_000), "currency": "USD"}  # minor units
+def _body(wallet_id: str) -> dict[str, Any]:
+    return {
+        "amount": random.randint(100, 50_000),  # minor units
+        "currency": "USD",
+        "wallet_id": wallet_id,
+    }
+
+
+def _create_wallet(user: HttpUser) -> str:
+    """Each simulated client gets its own wallet for payments to land in."""
+    resp = user.client.post(
+        "/v1/wallets",
+        json={"currency": "USD"},
+        headers=_headers(str(uuid.uuid4())),
+        name="/v1/wallets",
+    )
+    resp.raise_for_status()
+    return str(resp.json()["wallet_id"])
 
 
 class LegitimateUser(HttpUser):
@@ -40,13 +56,14 @@ class LegitimateUser(HttpUser):
     def on_start(self) -> None:
         if not API_KEY:
             raise RuntimeError("set IPPS_API_KEY (make tenant NAME=loadtest)")
+        self.wallet_id = _create_wallet(self)
         self.last_key: str | None = None
         self.last_body: dict[str, Any] | None = None
         self.last_payment_id: str | None = None
 
     @task(3)
     def create_payment(self) -> None:
-        key, body = str(uuid.uuid4()), _body()
+        key, body = str(uuid.uuid4()), _body(self.wallet_id)
         with self.client.post(
             PAYMENTS,
             json=body,
@@ -110,10 +127,11 @@ class ConcurrentDuplicateUser(HttpUser):
     def on_start(self) -> None:
         if not API_KEY:
             raise RuntimeError("set IPPS_API_KEY (make tenant NAME=loadtest)")
+        self.wallet_id = _create_wallet(self)
 
     @task
     def concurrent_same_key(self) -> None:
-        key, body = str(uuid.uuid4()), _body()
+        key, body = str(uuid.uuid4()), _body(self.wallet_id)
         ids: list[str] = []
 
         def send() -> None:

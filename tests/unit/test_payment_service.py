@@ -3,7 +3,7 @@ Unit tests for app/services/payment_service.py (database mocked).
 """
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -22,14 +22,21 @@ def _db() -> AsyncMock:
     return db
 
 
-async def _create(db: AsyncMock) -> object:
-    return await create_payment(
-        db,
-        tenant_id=TENANT,
-        idempotency_key="k1",
-        amount=5050,
-        currency="USD",
-    )
+WALLET = MagicMock(id=uuid.uuid4(), currency="USD")
+
+
+async def _create(db: AsyncMock, wallet: object = WALLET) -> object:
+    with patch(
+        "app.services.payment_service.get_wallet", new=AsyncMock(return_value=wallet)
+    ):
+        return await create_payment(
+            db,
+            tenant_id=TENANT,
+            idempotency_key="k1",
+            amount=5050,
+            currency="USD",
+            wallet_id=WALLET.id,
+        )
 
 
 @pytest.mark.asyncio
@@ -41,6 +48,8 @@ async def test_create_payment_writes_payment_and_outbox_for_tenant() -> None:
     payment = next(o for o in added if isinstance(o, Payment))
     event = next(o for o in added if isinstance(o, OutboxEvent))
     assert payment.tenant_id == TENANT and event.tenant_id == TENANT
+    assert payment.wallet_id == WALLET.id
+    assert event.payload["wallet_id"] == str(WALLET.id)
     assert payment.status is PaymentStatus.PENDING
     assert event.event_type == "payment.initiated"
     assert event.payload["payment_id"] == str(payment.id)
@@ -74,6 +83,20 @@ async def test_other_integrity_errors_propagate() -> None:
         await _create(db)
 
 
+@pytest.mark.asyncio
+async def test_unknown_wallet_is_a_stored_404() -> None:
+    with pytest.raises(BusinessRejection) as caught:
+        await _create(_db(), wallet=None)
+    assert caught.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_wallet_currency_must_match() -> None:
+    with pytest.raises(BusinessRejection) as caught:
+        await _create(_db(), wallet=MagicMock(id=WALLET.id, currency="NGN"))
+    assert caught.value.status_code == 422
+
+
 def test_payment_body_reports_minor_units() -> None:
     payment = Payment(
         id=uuid.uuid4(),
@@ -88,4 +111,5 @@ def test_payment_body_reports_minor_units() -> None:
         "status": "settled",
         "amount": 700,
         "currency": "NGN",
+        "wallet_id": None,
     }

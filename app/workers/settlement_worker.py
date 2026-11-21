@@ -19,6 +19,7 @@ from app.core.kafka_client import (
 from app.core.metrics import dlq_depth
 from app.models.payment import Payment, PaymentStatus
 from app.models.processed_event import ProcessedEvent
+from app.services.psp_results import OutcomeKind, PspOutcome, apply_psp_result
 from app.services.state_machine import validate_transition
 
 logger = structlog.get_logger()
@@ -54,6 +55,21 @@ async def process_message(
         logger.error("payment_not_found", payment_id=payment_id)
         return
 
+    if payment.wallet_id is None:
+        # A payment from before the ledger existed. Check *before* calling the
+        # provider: charging it and then failing to record the capture would
+        # be retried, and every retry would charge again.
+        logger.warning("legacy_payment_skipped", payment_id=payment_id)
+        db.add(
+            ProcessedEvent(
+                event_id=event_id,
+                consumer_group="settlement-worker",
+                tenant_id=payment.tenant_id,
+            )
+        )
+        await db.commit()
+        return
+
     validate_transition(payment.status, PaymentStatus.PROCESSING)
     payment.status = PaymentStatus.PROCESSING
     await db.commit()
@@ -68,8 +84,21 @@ async def process_message(
             },
         )
         response.raise_for_status()
-        validate_transition(payment.status, PaymentStatus.SETTLED)
-        payment.status = PaymentStatus.SETTLED
+        # v1 treated any HTTP 200 as success, but the provider reports a
+        # decline in the body (backlog D1). Every outcome now goes through
+        # apply_psp_result, which posts the capture to the ledger.
+        body = response.json()
+        if body.get("status") == "success":
+            outcome = PspOutcome(OutcomeKind.CAPTURED, body.get("transaction_id"))
+        else:
+            outcome = PspOutcome(OutcomeKind.DECLINED, reason=body.get("reason"))
+        await apply_psp_result(
+            db,
+            tenant_id=payment.tenant_id,
+            payment_id=payment.id,
+            outcome=outcome,
+            source="settlement_worker",
+        )
         processed = ProcessedEvent(
             event_id=event_id,
             consumer_group="settlement-worker",
@@ -77,11 +106,8 @@ async def process_message(
         )
         db.add(processed)
         await db.commit()
-        logger.info("payment_settled", payment_id=payment_id)
-
-        await kafka_producer.send_and_wait(
-            "payment.completed",
-            json.dumps({"payment_id": payment_id, "status": "settled"}).encode("utf-8"),
+        logger.info(
+            "payment_outcome_applied", payment_id=payment_id, outcome=outcome.kind
         )
 
     except Exception as e:

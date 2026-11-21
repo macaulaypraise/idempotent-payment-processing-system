@@ -28,7 +28,6 @@ from tests.conftest import TEST_REDIS_URL, UNREACHABLE_REDIS_URL
 pytestmark = pytest.mark.asyncio
 
 CONCURRENCY = int(os.environ.get("IPPS_CONCURRENCY", "1000"))
-BODY = {"amount": 10_000, "currency": "USD"}
 REDIS_STATES = pytest.mark.parametrize(
     "redis_url", [TEST_REDIS_URL, UNREACHABLE_REDIS_URL], ids=["redis-up", "redis-down"]
 )
@@ -56,7 +55,9 @@ async def test_concurrent_requests_with_one_key_create_one_payment(
     async with api_client(redis_url=redis_url) as client:
         responses = await asyncio.gather(
             *[
-                client.post("/v1/payments", json=BODY, headers=_headers(creds, key))
+                client.post(
+                    "/v1/payments", json=creds.payment(), headers=_headers(creds, key)
+                )
                 for _ in range(CONCURRENCY)
             ]
         )
@@ -85,10 +86,10 @@ async def test_sequential_retry_replays_identical_response(
     creds = await make_tenant()
     async with api_client(redis_url=redis_url) as client:
         first = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "k1")
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "k1")
         )
         second = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "k1")
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "k1")
         )
 
     assert first.status_code == second.status_code == 202
@@ -107,8 +108,10 @@ async def test_same_key_different_body_returns_422(
 ) -> None:
     creds = await make_tenant()
     async with api_client(redis_url=redis_url) as client:
-        ok = await client.post("/v1/payments", json=BODY, headers=_headers(creds, "k2"))
-        changed = {"amount": 99_900, "currency": "USD"}
+        ok = await client.post(
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "k2")
+        )
+        changed = creds.payment(amount=99_900)
         bad = await client.post(
             "/v1/payments", json=changed, headers=_headers(creds, "k2")
         )
@@ -124,14 +127,17 @@ async def test_fingerprint_ignores_key_order_and_whitespace(
 ) -> None:
     creds = await make_tenant()
     headers = {**_headers(creds, "k-order"), "Content-Type": "application/json"}
+    w = creds.wallet_id
     async with api_client() as client:
         a = await client.post(
             "/v1/payments",
-            content='{"amount": 500, "currency": "EUR"}',
+            content=f'{{"amount": 500, "currency": "USD", "wallet_id": "{w}"}}',
             headers=headers,
         )
         b = await client.post(
-            "/v1/payments", content='{ "currency":"EUR","amount":500 }', headers=headers
+            "/v1/payments",
+            content=f'{{ "wallet_id":"{w}", "currency":"USD","amount":500 }}',
+            headers=headers,
         )
     assert a.status_code == b.status_code == 202
     assert a.json() == b.json()
@@ -142,10 +148,12 @@ async def test_mismatch_detected_on_cache_hit(
 ) -> None:
     creds = await make_tenant()
     async with api_client() as client:
-        await client.post("/v1/payments", json=BODY, headers=_headers(creds, "k-cache"))
+        await client.post(
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "k-cache")
+        )
         bad = await client.post(
             "/v1/payments",
-            json={"amount": 100, "currency": "USD"},
+            json=creds.payment(amount=100),
             headers=_headers(creds, "k-cache"),
         )
     assert bad.status_code == 422
@@ -159,7 +167,9 @@ async def test_missing_idempotency_key_returns_400(
 ) -> None:
     creds = await make_tenant()
     async with api_client() as client:
-        resp = await client.post("/v1/payments", json=BODY, headers=creds.headers)
+        resp = await client.post(
+            "/v1/payments", json=creds.payment(), headers=creds.headers
+        )
     assert resp.status_code == 400
 
 
@@ -169,19 +179,22 @@ async def test_overlong_idempotency_key_returns_400(
     creds = await make_tenant()
     async with api_client() as client:
         resp = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "x" * 256)
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "x" * 256)
         )
     assert resp.status_code == 400
 
 
-async def test_missing_or_unknown_api_key_returns_401(api_client: Any) -> None:
+async def test_missing_or_unknown_api_key_returns_401(
+    api_client: Any, make_tenant: Any
+) -> None:
+    creds = await make_tenant()
     async with api_client() as client:
         none = await client.post(
-            "/v1/payments", json=BODY, headers={"Idempotency-Key": "a"}
+            "/v1/payments", json=creds.payment(), headers={"Idempotency-Key": "a"}
         )
         wrong = await client.post(
             "/v1/payments",
-            json=BODY,
+            json=creds.payment(),
             headers={"Idempotency-Key": "a", "Authorization": "Bearer ipps_nope"},
         )
     assert none.status_code == wrong.status_code == 401
@@ -198,7 +211,7 @@ async def test_revoked_api_key_returns_401(
         assert await revoke_api_key(db, creds.api_key[:12]) == 1
     async with api_client() as client:
         resp = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "k")
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "k")
         )
     assert resp.status_code == 401
 
@@ -210,7 +223,7 @@ async def test_cross_tenant_read_returns_404(api_client: Any, make_tenant: Any) 
     alice, bob = await make_tenant("alice"), await make_tenant("bob")
     async with api_client() as client:
         created = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(alice, "k")
+            "/v1/payments", json=alice.payment(), headers=_headers(alice, "k")
         )
         payment_id = created.json()["payment_id"]
         own = await client.get(f"/v1/payments/{payment_id}", headers=alice.headers)
@@ -225,10 +238,10 @@ async def test_same_key_in_two_tenants_creates_two_payments(
     alice, bob = await make_tenant("alice"), await make_tenant("bob")
     async with api_client() as client:
         a = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(alice, "shared")
+            "/v1/payments", json=alice.payment(), headers=_headers(alice, "shared")
         )
         b = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(bob, "shared")
+            "/v1/payments", json=bob.payment(), headers=_headers(bob, "shared")
         )
     assert a.status_code == b.status_code == 202
     assert a.json()["payment_id"] != b.json()["payment_id"]
@@ -262,7 +275,7 @@ async def test_waiting_on_an_in_flight_key_times_out_with_409(
         )
         async with api_client(IDEMPOTENCY_LOCK_TIMEOUT_MS=200) as client:
             blocked = await client.post(
-                "/v1/payments", json=BODY, headers=_headers(creds, key)
+                "/v1/payments", json=creds.payment(), headers=_headers(creds, key)
             )
         await holder.rollback()
 
@@ -271,7 +284,7 @@ async def test_waiting_on_an_in_flight_key_times_out_with_409(
 
     async with api_client() as client:
         after = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, key)
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, key)
         )
     assert after.status_code == 202
 
@@ -288,7 +301,7 @@ async def test_replay_after_cache_loss_is_identical_even_if_status_moved_on(
     creds = await make_tenant()
     async with api_client() as client:
         first = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "k")
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "k")
         )
     payment_id = uuid.UUID(first.json()["payment_id"])
 
@@ -296,13 +309,13 @@ async def test_replay_after_cache_loss_is_identical_even_if_status_moved_on(
     await db_session.execute(
         update(Payment)
         .where(Payment.id == payment_id)
-        .values(status=PaymentStatus.SETTLED)
+        .values(status=PaymentStatus.PROCESSING)
     )
     await db_session.commit()
 
     async with api_client() as client:
         replay = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "k")
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "k")
         )
     assert replay.json() == first.json()
     assert replay.json()["status"] == "pending"
@@ -314,7 +327,7 @@ async def test_response_cached_only_after_commit(
     creds = await make_tenant()
     async with api_client() as client:
         resp = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "k")
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "k")
         )
     raw = await redis_client.get(ResponseCache.cache_key(creds.tenant_id, "k"))
     assert raw is not None
@@ -340,7 +353,9 @@ async def test_reusing_a_swept_key_is_rejected_not_duplicated(
 
     creds = await make_tenant()
     async with api_client() as client:
-        await client.post("/v1/payments", json=BODY, headers=_headers(creds, "old"))
+        await client.post(
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "old")
+        )
 
     later = FakeClock(datetime.now(UTC) + timedelta(days=2))
     assert await run_once(session_factory, later, batch_size=10) == 1
@@ -348,10 +363,10 @@ async def test_reusing_a_swept_key_is_rejected_not_duplicated(
 
     async with api_client() as client:
         reuse = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "old")
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "old")
         )
         again = await client.post(
-            "/v1/payments", json=BODY, headers=_headers(creds, "old")
+            "/v1/payments", json=creds.payment(), headers=_headers(creds, "old")
         )
     assert reuse.status_code == again.status_code == 422
     assert reuse.json() == again.json()

@@ -20,6 +20,7 @@ from app.models.payment import Payment, PaymentStatus
 from app.services.outbox_poller import poll_and_publish
 from app.services.payment_service import create_payment as _create_payment
 from app.services.state_machine import validate_transition
+from app.services.wallets import create_wallet
 from tests.conftest import DEFAULT_TENANT_ID
 
 
@@ -27,12 +28,15 @@ async def create_payment(
     db: AsyncSession, _redis: Redis, key: str, amount: float, currency: str
 ) -> dict[str, Any]:
     """Business write only (idempotency is covered in test_idempotency.py)."""
+    wallet = await create_wallet(db, tenant_id=DEFAULT_TENANT_ID, currency=currency)
+    assert wallet.resource_id is not None
     result = await _create_payment(
         db,
         tenant_id=DEFAULT_TENANT_ID,
         idempotency_key=key,
         amount=round(amount * 100),  # tests pass major units for readability
         currency=currency,
+        wallet_id=wallet.resource_id,
     )
     await db.commit()
     return result.body

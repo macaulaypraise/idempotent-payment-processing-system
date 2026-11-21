@@ -433,7 +433,7 @@ async def test_system_accounts_are_created_once_per_tenant_and_currency(
             await db.execute(
                 text(
                     "SELECT kind, count(*) FROM accounts WHERE tenant_id = :t "
-                    "AND wallet_id IS NULL GROUP BY kind"
+                    "AND currency = 'EUR' AND wallet_id IS NULL GROUP BY kind"
                 ),
                 {"t": tenant},
             )

@@ -9,6 +9,7 @@ from app.core.db_errors import violates_constraint
 from app.models.outbox_event import OutboxEvent
 from app.models.payment import Payment, PaymentStatus
 from app.services.idempotency import BusinessRejection, HandlerResult
+from app.services.wallets import get_wallet
 
 
 def payment_body(payment: Payment) -> dict[str, Any]:
@@ -17,6 +18,7 @@ def payment_body(payment: Payment) -> dict[str, Any]:
         "status": payment.status.value,
         "amount": payment.amount,
         "currency": payment.currency,
+        "wallet_id": str(payment.wallet_id) if payment.wallet_id else None,
     }
 
 
@@ -27,9 +29,24 @@ async def create_payment(
     idempotency_key: str,
     amount: int,
     currency: str,
+    wallet_id: uuid.UUID,
 ) -> HandlerResult:
     """Business write for POST /v1/payments: the payment row and its outbox
-    event. Runs inside execute_idempotent's savepoint; no commit here."""
+    event. Runs inside execute_idempotent's savepoint; no commit here.
+
+    Nothing is posted to the ledger until the provider confirms the capture.
+    """
+    wallet = await get_wallet(db, tenant_id=tenant_id, wallet_id=wallet_id)
+    if wallet is None:
+        raise BusinessRejection(404, {"detail": f"Wallet {wallet_id} not found"})
+    if wallet.currency != currency:
+        raise BusinessRejection(
+            422,
+            {
+                "detail": f"Payment currency {currency} does not match wallet "
+                f"currency {wallet.currency}"
+            },
+        )
     payment = Payment(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -37,6 +54,7 @@ async def create_payment(
         amount=amount,
         currency=currency,
         status=PaymentStatus.PENDING,
+        wallet_id=wallet_id,
     )
     db.add(payment)
     db.add(
@@ -49,6 +67,7 @@ async def create_payment(
                 "tenant_id": str(tenant_id),
                 "amount": amount,
                 "currency": currency,
+                "wallet_id": str(wallet_id),
             },
         )
     )

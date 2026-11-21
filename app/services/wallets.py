@@ -8,18 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.ledger import NORMAL_SIDE, Account, AccountKind, Entry
 from app.models.wallet import Wallet
+from app.services import posting_rules
 from app.services.idempotency import BusinessRejection, HandlerResult
 from app.services.ledger import (
     InsufficientFundsError,
     Reference,
     balances,
-    credit,
-    debit,
     post_transfer,
     system_accounts,
 )
+from app.services.posting_rules import WalletAccounts
 
-WALLET_TRANSFER = "wallet_transfer"
 # Wallet transfers are referenced by their idempotency key, so the ledger's
 # own unique constraint backs up the idempotency layer.
 _KEY_NAMESPACE = uuid.UUID("6f1c1f3e-2a51-4f1a-9a59-4b5b8e1c0d11")
@@ -27,6 +26,10 @@ _KEY_NAMESPACE = uuid.UUID("6f1c1f3e-2a51-4f1a-9a59-4b5b8e1c0d11")
 
 def idempotency_reference(tenant_id: uuid.UUID, key: str) -> uuid.UUID:
     return uuid.uuid5(_KEY_NAMESPACE, f"{tenant_id}:{key}")
+
+
+def wallet_accounts(wallet: Wallet) -> WalletAccounts:
+    return WalletAccounts(wallet.pending_account_id, wallet.available_account_id)
 
 
 def _wallet_account(
@@ -167,14 +170,13 @@ async def transfer_between_wallets(
             db,
             tenant_id=tenant_id,
             reference=Reference(
-                WALLET_TRANSFER,
+                posting_rules.WALLET_TRANSFER,
                 "idempotency_key",
                 idempotency_reference(tenant_id, idempotency_key),
             ),
-            lines=[
-                debit(source.available_account_id, amount),
-                credit(target.available_account_id, amount),
-            ],
+            lines=posting_rules.wallet_transfer(
+                amount, wallet_accounts(source), wallet_accounts(target)
+            ),
         )
     except InsufficientFundsError as exc:
         raise BusinessRejection(

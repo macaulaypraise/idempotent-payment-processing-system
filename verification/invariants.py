@@ -5,8 +5,8 @@ the invariant holds. Checks take an optional tenant to scope the query, so
 tests that share a database can check only their own data. I2 is global by
 nature; with a tenant it checks that tenant's slice of the ledger.
 
-Implemented: I1, I2, I5, I6 (Stage 2). I3, I4, I7-I10 arrive with the
-stages that create the data they check.
+Implemented: I1, I2, I5, I6 (Stage 2); I4 for payments and refunds
+(Stage 3). I3, I7-I10 arrive with the stages that create the data they check.
 """
 
 import uuid
@@ -128,11 +128,87 @@ async def i6_guarded_accounts_not_negative(
     ]
 
 
+async def i4_payment_captures(
+    db: AsyncSession, tenant_id: uuid.UUID | None = None
+) -> list[str]:
+    """I4: CAPTURED, SETTLED and REFUNDED payments have exactly one capture
+    transfer; PENDING, PROCESSING and FAILED have none. Pre-ledger (v1)
+    payments without a wallet are out of scope."""
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT p.id, p.status, count(t.id) AS captures
+                FROM payments p
+                LEFT JOIN transfers t
+                  ON t.tenant_id = p.tenant_id AND t.kind = 'capture'
+                 AND t.reference_type = 'payment' AND t.reference_id = p.id
+                WHERE p.wallet_id IS NOT NULL {_tenant_filter("p", tenant_id)}
+                GROUP BY p.id, p.status
+                HAVING count(t.id) <> CASE
+                    WHEN p.status IN ('CAPTURED', 'SETTLED', 'REFUNDED') THEN 1
+                    ELSE 0 END
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+    ).all()
+    return [f"I4 payment {r.id} is {r.status} with {r.captures} captures" for r in rows]
+
+
+async def i4_refund_postings(
+    db: AsyncSession, tenant_id: uuid.UUID | None = None
+) -> list[str]:
+    """I4 (refunds): every refund has exactly one hold; SUCCEEDED has one
+    confirm and no release; FAILED has one release and no confirm; in-flight
+    refunds have neither. A SUCCEEDED refund's payment is REFUNDED."""
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT r.id, r.status, p.status AS payment_status,
+                       count(*) FILTER (WHERE t.kind = 'refund_hold') AS holds,
+                       count(*) FILTER (WHERE t.kind = 'refund_confirm') AS confirms,
+                       count(*) FILTER (WHERE t.kind = 'refund_release') AS releases
+                FROM refunds r
+                JOIN payments p ON p.id = r.payment_id
+                LEFT JOIN transfers t
+                  ON t.tenant_id = r.tenant_id AND t.reference_type = 'refund'
+                 AND t.reference_id = r.id
+                WHERE true {_tenant_filter("r", tenant_id)}
+                GROUP BY r.id, r.status, p.status
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+    ).all()
+    expected = {
+        "PENDING": (1, 0, 0),
+        "PROCESSING": (1, 0, 0),
+        "SUCCEEDED": (1, 1, 0),
+        "FAILED": (1, 0, 1),
+    }
+    violations = [
+        f"I4 refund {r.id} is {r.status} with holds/confirms/releases "
+        f"{r.holds}/{r.confirms}/{r.releases}"
+        for r in rows
+        if (r.holds, r.confirms, r.releases) != expected[r.status]
+    ]
+    violations.extend(
+        f"I4 refund {r.id} SUCCEEDED but payment is {r.payment_status}"
+        for r in rows
+        if r.status == "SUCCEEDED" and r.payment_status != "REFUNDED"
+    )
+    return violations
+
+
 LEDGER_INVARIANTS: tuple[Check, ...] = (
     i1_transfers_balance,
     i2_ledger_balances,
     i5_account_totals_match_entries,
     i6_guarded_accounts_not_negative,
+    i4_payment_captures,
+    i4_refund_postings,
 )
 
 

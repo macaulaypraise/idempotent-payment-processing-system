@@ -3,6 +3,7 @@ from app.models.ledger import Account, AccountKind, Entry, Side, Transfer
 from app.models.outbox_event import OutboxEvent
 from app.models.payment import Payment, PaymentStatus
 from app.models.processed_event import ProcessedEvent
+from app.models.refund import Refund, RefundStatus
 from app.models.tenant import DEFAULT_TENANT_ID, ApiKey, Tenant
 from app.models.wallet import Wallet
 
@@ -17,6 +18,8 @@ __all__ = [
     "Payment",
     "PaymentStatus",
     "ProcessedEvent",
+    "Refund",
+    "RefundStatus",
     "Side",
     "Tenant",
     "Transfer",

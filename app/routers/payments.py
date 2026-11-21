@@ -68,6 +68,7 @@ async def create_payment_route(
                 idempotency_key=idempotency_key,
                 amount=payload.amount,
                 currency=payload.currency,
+                wallet_id=payload.wallet_id,
             ),
         )
     except IdempotencyKeyMismatchError:

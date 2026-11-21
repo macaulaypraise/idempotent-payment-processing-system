@@ -34,8 +34,9 @@ _CLEAN_SQL = (
     # immutability triggers so tests can start clean (owner is a superuser in
     # docker-compose and CI).
     "SET session_replication_role = replica",
-    "TRUNCATE TABLE entries, transfers, wallets, accounts, idempotency_keys, "
-    "api_keys, outbox_events, processed_events, payments RESTART IDENTITY CASCADE",
+    "TRUNCATE TABLE refunds, entries, transfers, payments, wallets, accounts, "
+    "idempotency_keys, api_keys, outbox_events, processed_events "
+    "RESTART IDENTITY CASCADE",
     f"DELETE FROM tenants WHERE id <> '{DEFAULT_TENANT_ID}'",
     "SET session_replication_role = DEFAULT",
 )
@@ -110,8 +111,10 @@ async def session_factory(
             await conn.execute(text(statement))
     await owner.dispose()
 
+    # Generous pool_timeout: the 1,000-request tests queue on 20 connections,
+    # and coverage tracing slows slower machines past the 30 s default.
     engine = create_async_engine(
-        migrated_database, echo=False, pool_size=10, max_overflow=10
+        migrated_database, echo=False, pool_size=10, max_overflow=10, pool_timeout=120
     )
     yield async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     await engine.dispose()
@@ -146,10 +149,18 @@ async def redis_client() -> AsyncGenerator[Redis, None]:
 class TenantCredentials:
     tenant_id: uuid.UUID
     api_key: str
+    wallet_id: uuid.UUID  # a USD wallet, so payments have somewhere to land
 
     @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
+
+    def payment(self, amount: int = 10_000, currency: str = "USD") -> dict[str, Any]:
+        return {
+            "amount": amount,
+            "currency": currency,
+            "wallet_id": str(self.wallet_id),
+        }
 
 
 @pytest.fixture
@@ -158,10 +169,14 @@ def make_tenant(
 ) -> Callable[[str], Any]:
     async def _make(name: str = "acme") -> TenantCredentials:
         from app.cli import create_tenant
+        from app.services.wallets import create_wallet
 
         async with session_factory() as db:
             tenant_id, api_key = await create_tenant(db, name)
-        return TenantCredentials(tenant_id, api_key)
+            wallet = await create_wallet(db, tenant_id=tenant_id, currency="USD")
+            await db.commit()
+        assert wallet.resource_id is not None
+        return TenantCredentials(tenant_id, api_key, wallet.resource_id)
 
     return _make
 

@@ -1,105 +1,99 @@
 """
-Unit tests for app/services/state_machine.py
-Target: 100% coverage — pure logic, no I/O
+Payment and refund state machines: the full transition matrix, and parity
+between the Python maps and the SQL the migration installs as triggers.
 """
+
+import importlib.util
+import itertools
+from pathlib import Path
 
 import pytest
 
 from app.core.exceptions import InvalidStateTransitionError
 from app.models.payment import PaymentStatus
-from app.services.state_machine import validate_transition
+from app.models.refund import RefundStatus
+from app.services.state_machine import (
+    REFUND_TRANSITIONS,
+    VALID_TRANSITIONS,
+    validate_refund_transition,
+    validate_transition,
+)
 
-# Valid transitions — must not raise
-
-
-def test_pending_to_processing() -> None:
-    validate_transition(PaymentStatus.PENDING, PaymentStatus.PROCESSING)
-
-
-def test_processing_to_settled() -> None:
-    validate_transition(PaymentStatus.PROCESSING, PaymentStatus.SETTLED)
-
-
-def test_processing_to_failed() -> None:
-    validate_transition(PaymentStatus.PROCESSING, PaymentStatus.FAILED)
-
-
-def test_settled_to_refunded() -> None:
-    validate_transition(PaymentStatus.SETTLED, PaymentStatus.REFUNDED)
-
-
-def test_failed_to_pending() -> None:
-    validate_transition(PaymentStatus.FAILED, PaymentStatus.PENDING)
+ALLOWED_PAYMENT = {
+    (PaymentStatus.PENDING, PaymentStatus.PROCESSING),
+    (PaymentStatus.PROCESSING, PaymentStatus.CAPTURED),
+    (PaymentStatus.PROCESSING, PaymentStatus.FAILED),
+    (PaymentStatus.CAPTURED, PaymentStatus.SETTLED),
+    (PaymentStatus.CAPTURED, PaymentStatus.REFUNDED),
+    (PaymentStatus.SETTLED, PaymentStatus.REFUNDED),
+}
+ALLOWED_REFUND = {
+    (RefundStatus.PENDING, RefundStatus.PROCESSING),
+    (RefundStatus.PROCESSING, RefundStatus.SUCCEEDED),
+    (RefundStatus.PROCESSING, RefundStatus.FAILED),
+}
 
 
-# Invalid transitions — must raise InvalidStateTransitionError
+@pytest.mark.parametrize(
+    "current,new", list(itertools.product(PaymentStatus, PaymentStatus))
+)
+def test_payment_transition_matrix(current: PaymentStatus, new: PaymentStatus) -> None:
+    if (current, new) in ALLOWED_PAYMENT:
+        validate_transition(current, new)
+    else:
+        with pytest.raises(InvalidStateTransitionError):
+            validate_transition(current, new)
 
 
-def test_pending_to_settled_raises() -> None:
-    with pytest.raises(InvalidStateTransitionError):
-        validate_transition(PaymentStatus.PENDING, PaymentStatus.SETTLED)
+@pytest.mark.parametrize(
+    "current,new", list(itertools.product(RefundStatus, RefundStatus))
+)
+def test_refund_transition_matrix(current: RefundStatus, new: RefundStatus) -> None:
+    if (current, new) in ALLOWED_REFUND:
+        validate_refund_transition(current, new)
+    else:
+        with pytest.raises(InvalidStateTransitionError):
+            validate_refund_transition(current, new)
 
 
-def test_pending_to_refunded_raises() -> None:
-    with pytest.raises(InvalidStateTransitionError):
-        validate_transition(PaymentStatus.PENDING, PaymentStatus.REFUNDED)
-
-
-def test_pending_to_failed_raises() -> None:
-    with pytest.raises(InvalidStateTransitionError):
-        validate_transition(PaymentStatus.PENDING, PaymentStatus.FAILED)
-
-
-def test_settled_to_processing_raises() -> None:
-    with pytest.raises(InvalidStateTransitionError):
-        validate_transition(PaymentStatus.SETTLED, PaymentStatus.PROCESSING)
-
-
-def test_settled_to_pending_raises() -> None:
-    with pytest.raises(InvalidStateTransitionError):
-        validate_transition(PaymentStatus.SETTLED, PaymentStatus.PENDING)
-
-
-def test_settled_to_failed_raises() -> None:
-    with pytest.raises(InvalidStateTransitionError):
-        validate_transition(PaymentStatus.SETTLED, PaymentStatus.FAILED)
-
-
-def test_refunded_to_any_raises() -> None:
-    for target in PaymentStatus:
-        if target != PaymentStatus.REFUNDED:
-            with pytest.raises(InvalidStateTransitionError):
-                validate_transition(PaymentStatus.REFUNDED, target)
-
-
-def test_failed_to_settled_raises() -> None:
-    with pytest.raises(InvalidStateTransitionError):
-        validate_transition(PaymentStatus.FAILED, PaymentStatus.SETTLED)
-
-
-def test_failed_to_refunded_raises() -> None:
-    with pytest.raises(InvalidStateTransitionError):
-        validate_transition(PaymentStatus.FAILED, PaymentStatus.REFUNDED)
-
-
-# Error carries current and requested status
+def test_failed_and_refunded_are_terminal() -> None:
+    assert VALID_TRANSITIONS[PaymentStatus.FAILED] == set()
+    assert VALID_TRANSITIONS[PaymentStatus.REFUNDED] == set()
 
 
 def test_error_message_includes_statuses() -> None:
-    with pytest.raises(InvalidStateTransitionError) as exc_info:
-        validate_transition(PaymentStatus.PENDING, PaymentStatus.REFUNDED)
-    msg = str(exc_info.value).lower()
-    assert "pending" in msg
-    assert "refunded" in msg
+    with pytest.raises(InvalidStateTransitionError) as caught:
+        validate_transition(PaymentStatus.FAILED, PaymentStatus.PENDING)
+    assert "failed" in str(caught.value.detail)
+    assert "pending" in str(caught.value.detail)
 
 
-# Enum completeness
+def _migration() -> object:
+    path = next(Path("migrations/versions").glob("d4b9e2f7a315_*.py"))
+    spec = importlib.util.spec_from_file_location("stage3_migration", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def test_all_expected_statuses_exist() -> None:
-    statuses = {s.value for s in PaymentStatus}
-    assert "pending" in statuses
-    assert "processing" in statuses
-    assert "settled" in statuses
-    assert "failed" in statuses
-    assert "refunded" in statuses
+def test_database_trigger_allows_exactly_the_python_transitions() -> None:
+    migration = _migration()
+    sql_payment = {
+        (PaymentStatus[a], PaymentStatus[b])
+        for a, b in migration.PAYMENT_TRANSITIONS  # type: ignore[attr-defined]
+    }
+    sql_refund = {
+        (RefundStatus[a], RefundStatus[b])
+        for a, b in migration.REFUND_TRANSITIONS  # type: ignore[attr-defined]
+    }
+    python_payment = {
+        (a, b) for a, targets in VALID_TRANSITIONS.items() for b in targets
+    }
+    python_refund = {
+        (a, b) for a, targets in REFUND_TRANSITIONS.items() for b in targets
+    }
+    assert sql_payment == python_payment == ALLOWED_PAYMENT
+    assert sql_refund == python_refund == ALLOWED_REFUND
+    assert set(migration.PAYMENT_STATUSES) == {s.name for s in PaymentStatus}  # type: ignore[attr-defined]
+    assert set(migration.REFUND_STATUSES) == {s.name for s in RefundStatus}  # type: ignore[attr-defined]
