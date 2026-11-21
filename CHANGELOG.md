@@ -12,6 +12,54 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 3 — Lifecycle on the ledger + refunds
+
+**Breaking**
+- `POST /v1/payments` requires `wallet_id` (same tenant, same currency); the
+  capture credits that wallet. Unknown wallet is a stored 404, currency
+  mismatch a stored 422.
+- Payment statuses: `pending → processing → captured → settled`,
+  `processing → failed` (terminal), `captured | settled → refunded`. The
+  provider accepting a charge is now `captured`, not `settled`; `settled`
+  means the settlement file has cleared it (Stage 6).
+
+**Added**
+- `apply_psp_result`: the single, idempotent entry point for charge
+  outcomes. Locks the payment, ignores an outcome already reflected, refuses
+  contradictions (`ConflictingOutcomeError`) and early outcomes
+  (`NotApplicableYetError`), posts the capture transfer, writes the outbox
+  event, in the caller's transaction.
+- Refunds (full only): `POST /v1/refunds` (idempotent) and
+  `GET /v1/refunds/{id}`. Requesting a refund locks the payment, checks it is
+  captured or settled with no active refund, and holds the amount in
+  `refunds_payable` from wallet pending (captured) or available (settled).
+  `apply_refund_result` / `confirm_refund` / `fail_refund` post the
+  confirmation or return the hold to where the money belongs at that moment.
+- `app/services/posting_rules.py`: one pure function per row of the DESIGN
+  posting table (all eight rows, including settlement and release for
+  Stage 6).
+- Database guards: `payments.status` is text with a CHECK; triggers reject
+  illegal payment and refund transitions and changes to amount, currency,
+  tenant, key or wallet. At most one non-failed refund per payment.
+- `verification/invariants.py`: I4 for payments (exactly one capture when
+  captured/settled/refunded, none otherwise) and for refunds.
+- Metric `psp_results_total{source,outcome,result}`.
+
+**Fixed**
+- v1 recorded provider declines as `settled` (D1): the worker now reads the
+  outcome from the response body and applies it through `apply_psp_result`.
+- The worker skips wallet-less (v1) payments before calling the provider,
+  so they can never be charged without being recorded (S3-1).
+
+**Changed**
+- Test engine `pool_timeout` 30 s → 120 s: the 1,000-request tests could
+  time out under coverage on slower machines.
+- Load test users create a wallet first and send `wallet_id`.
+
+**Measured**: posting table exhaustively unit-tested; 30 capture/refund
+races, 20 concurrent refund requests (exactly one created), confirm racing
+fail (one winner); I1, I2, I4, I5, I6 hold after each.
+
 ### Stage 2 — Ledger core
 
 **Breaking**

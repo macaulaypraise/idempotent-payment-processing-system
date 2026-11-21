@@ -12,7 +12,7 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 
 | # | Defect | Where | Evidence | Fixed by |
 |---|---|---|---|---|
-| D1 | A provider **decline is recorded as `SETTLED`**. The mock returns HTTP 200 with `{"status": "failed"}`; the worker only calls `raise_for_status()`. | `app/workers/settlement_worker.py` `process_message` | code | Stage 4 (charger reads the outcome; `apply_psp_result`) |
+| D1 | A provider **decline is recorded as `SETTLED`**. The mock returns HTTP 200 with `{"status": "failed"}`; the worker only calls `raise_for_status()`. | `app/workers/settlement_worker.py` `process_message` | code | ✅ fixed — Stage 3 — worker reads the outcome and applies it through apply_psp_result |
 | D2 | **Retries never run.** On a provider error the worker re-publishes `payment.initiated`; the retry calls `validate_transition(PROCESSING, PROCESSING)`, which raises, so the payment stays `PROCESSING` forever and the DLQ / `FAILED` path is unreachable. | `settlement_worker.py` | observed: `422: Invalid transition: processing → processing` after a provider timeout; payment stuck in `PROCESSING` | Stage 4 (retries scheduled in Postgres, sweeper) |
 | D3 | No idempotency key on the provider call, and the mock provider is not idempotent, so a retry after charge-then-timeout would charge twice (masked today by D2). | `settlement_worker.py`, `mock_provider/main.py` | code | Stage 4 (payment id as provider key; `psp_sim`) |
 | D4 | If retries were exhausted, the payment would be marked `FAILED` even though the provider may have charged. A timeout means *unknown*, not failure. | `settlement_worker.py` | code | Stage 4 (stays `PROCESSING`; reconciliation decides) |
@@ -38,7 +38,7 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | D14 | Idempotency keys are global, not per tenant; no authentication. | `app/models/payment.py` | code | ✅ fixed — Stage 1 |
 | D15 | Money is `Numeric(12,2)` in the DB and `float` in the schema, service and outbox payload. | `models/payment.py`, `schemas/payment.py`, `payment_service.py` | code | ✅ fixed — Stage 2 (integer minor units everywhere) |
 | D16 | `version` column is never used. | `models/payment.py` | code | ✅ fixed — Stage 2 (dropped) |
-| D17 | State machine is enforced only in Python. The DB has an enum but no transition guard. `FAILED → PENDING` is allowed. | `app/services/state_machine.py`, initial migration | code | Stage 3 (DB guard; `FAILED` terminal) |
+| D17 | State machine is enforced only in Python. The DB has an enum but no transition guard. `FAILED → PENDING` is allowed. | `app/services/state_machine.py`, initial migration | code | ✅ fixed — Stage 3 — DB transition and immutability triggers; FAILED terminal |
 | D18 | Test fixtures build the schema with `Base.metadata.create_all`, not Alembic, so constraints and triggers written in raw SQL in migrations would be missing in tests. | `tests/conftest.py` | code | ✅ fixed — Stage 1 (fixtures run Alembic) |
 
 ### Operability (fix opportunistically, by Stage 8)
@@ -75,6 +75,16 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | S2-3 | Test cleanup truncates append-only tables with `session_replication_role = replica`, which needs a superuser owner (true for docker-compose and CI). A managed Postgres without superuser would need per-test databases instead. | `tests/conftest.py` | 8 |
 | S2-4 | Managed Postgres may not let the migration user `CREATE ROLE`; then create `APP_DB_ROLE` by hand once before migrating. | migration `c3a8d1e6f204` | 8 |
 | S2-5 | Hot system accounts (`psp_clearing`, `bank`) will serialise posting per tenant and currency once Stage 3 posts captures; measure before optimising. | `services/ledger.py` | 8 |
+
+## Found during Stage 3
+
+| # | Item | Where | Stage |
+|---|---|---|---|
+| S3-1 | **Fixed in Stage 3.** A v1 payment (no wallet) reaching the worker would be charged, then fail to record the capture, then be retried and charged again. The worker now skips wallet-less payments *before* calling the provider. | `workers/settlement_worker.py` | done |
+| S3-2 | Refunds stay `PENDING` until Stage 4: nothing calls the provider for them yet. `start_refund_processing` and `apply_refund_result` are ready for the charger. | — | 4 |
+| S3-3 | `payment.initiated` is still published straight to the topic named after the event type; Stage 5 consolidates topics (`payments.v1`, …). New event types (`payment.captured`, `payment.failed`, `payment.refunded`, `refund.*`) follow the same v1 pattern until then. | outbox | 5 |
+| S3-4 | v1 payments keep `wallet_id = NULL` and are excluded from I4. They cannot be refunded through `/v1/refunds`. | — | — |
+| S3-5 | The v1 retry path (D2) and in-loop sleeps (D5) are untouched: a provider timeout still leaves the payment `PROCESSING`. | `workers/settlement_worker.py` | 4 |
 
 ## Parked ideas (not in any current stage)
 

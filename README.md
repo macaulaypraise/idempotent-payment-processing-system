@@ -88,6 +88,10 @@ cp .env.example .env
 make dev                     # starts the stack and applies migrations
 make tenant NAME=demo        # prints tenant_id and api_key (shown once)
 export IPPS_API_KEY=<api_key>
+# Payments land in a wallet:
+WALLET_ID=$(curl -s -X POST http://localhost:8000/v1/wallets \
+  -H "Authorization: Bearer $IPPS_API_KEY" -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" -d '{"currency": "USD"}' | jq -r .wallet_id)
 ```
 
 API live at **http://localhost:8000/docs**
@@ -99,21 +103,21 @@ curl -X POST http://localhost:8000/v1/payments \
   -H "Authorization: Bearer $IPPS_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $KEY" \
-  -d '{"amount": 9999, "currency": "USD"}'
+  -d '{"amount": 9999, "currency": "USD", "wallet_id": "'$WALLET_ID'"}'
 
 # Retry: identical response with "Idempotent-Replayed: true", no second payment
 curl -i -X POST http://localhost:8000/v1/payments \
   -H "Authorization: Bearer $IPPS_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $KEY" \
-  -d '{"amount": 9999, "currency": "USD"}'
+  -d '{"amount": 9999, "currency": "USD", "wallet_id": "'$WALLET_ID'"}'
 
 # Same key, different body: 422. Missing key: 400. Key still in flight: 409.
 
-# Amounts are integer minor units (9999 = 99.99). Wallets and transfers:
-curl -X POST http://localhost:8000/v1/wallets \
+# Amounts are integer minor units (9999 = 99.99). Refund a captured payment:
+curl -X POST http://localhost:8000/v1/refunds \
   -H "Authorization: Bearer $IPPS_API_KEY" -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" -d '{"currency": "USD"}'
+  -H "Content-Type: application/json" -d '{"payment_id": "<payment_id>"}'
 ```
 
 ---

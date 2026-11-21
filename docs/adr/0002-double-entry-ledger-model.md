@@ -66,6 +66,21 @@ need such a model to check against.
   payments credit `wallet_pending`). Tests fund wallets by posting from
   `psp_clearing` directly.
 
+### As built (Stage 3)
+
+- Money moves on the ledger only when the provider confirms it: payment
+  creation posts nothing; `apply_psp_result` posts the capture
+  (`psp_clearing` → `wallet_pending`) in the same transaction as the status
+  change and the outbox event. Refund requests post the hold immediately;
+  the provider's answer posts the confirmation or returns the hold.
+- Every money-moving state change has its own transfer kind and reference
+  (`capture`/payment, `refund_hold`/refund, …), so the transfer's unique
+  reference makes each posting happen at most once even if the surrounding
+  code is re-run.
+- `payments.status` moved from a Postgres enum to text + CHECK + trigger:
+  adding a state to an enum cannot be used in the same transaction, and the
+  trigger needs the transition table anyway.
+
 ## Alternatives considered
 
 | Option | Why not |
