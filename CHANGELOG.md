@@ -6,12 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [Unreleased] — v2 "Ledgerline" (branch `v2`)
 
-### Planned
-- Deploy to Railway.app with live public URL
-- Grafana dashboard export for one-click provisioning
-- Blog post: "How the Outbox Pattern solves the dual-write problem"
+v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
+double-entry ledger, a hostile PSP simulator, reconciliation, and a
+verification harness. Each build stage is tagged `v2-stage-N`.
+
+### Stage 0 — Baseline and reframe
+
+**Changed**
+- Deploy workflow runs only for successful `push` builds of `main` and
+  deploys the tested commit; v2 branch builds no longer reach Railway.
+- Local Kafka: Confluent 7.6 + Zookeeper replaced by `apache/kafka:4.2.1` in
+  KRaft mode. Containers use `kafka:29092`, the host `localhost:9092`.
+- `make dev` now runs Alembic migrations through a one-shot `migrate` service
+  before the API and workers start.
+- Makefile targets fixed (service name `api`, `.venv/bin` paths, Kafka CLI
+  path, `make test` matches CI, `typecheck` runs `mypy .`).
+- CI Postgres 15 → 16, matching docker-compose.
+- `.env.example` completed (`POSTGRES_*`, `GF_ADMIN_PASSWORD`) and corrected
+  (Kafka bootstrap address, provider host name).
+
+**Added**
+- `app/core/clock.py`: injectable `Clock` with `SystemClock` and `FakeClock`.
+- `docs/adr/`: template and draft ADRs 0001–0005 (idempotency truth, ledger
+  model, balance updates, Kafka without abstraction, polling outbox).
+- `docs/backlog.md`: 22 known v1 defects with evidence and the stage that
+  fixes each, including two confirmed against the running stack (retries
+  never run; Redis outage takes the API down).
+- Placeholder Makefile targets `verify`, `verify-quick`, `verify-faults`,
+  `bench`, `recon`, `demo` that fail until their stage lands.
+- `.dockerignore`, `.env.test.example`.
+
+**Removed from version control**
+- `.vscode/`, `extensions.txt`, `repo-structure.txt`, committed `__pycache__`.
 
 ---
 
