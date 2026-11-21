@@ -13,18 +13,18 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | # | Defect | Where | Evidence | Fixed by |
 |---|---|---|---|---|
 | D1 | A provider **decline is recorded as `SETTLED`**. The mock returns HTTP 200 with `{"status": "failed"}`; the worker only calls `raise_for_status()`. | `app/workers/settlement_worker.py` `process_message` | code | ✅ fixed — Stage 3 — worker reads the outcome and applies it through apply_psp_result |
-| D2 | **Retries never run.** On a provider error the worker re-publishes `payment.initiated`; the retry calls `validate_transition(PROCESSING, PROCESSING)`, which raises, so the payment stays `PROCESSING` forever and the DLQ / `FAILED` path is unreachable. | `settlement_worker.py` | observed: `422: Invalid transition: processing → processing` after a provider timeout; payment stuck in `PROCESSING` | Stage 4 (retries scheduled in Postgres, sweeper) |
-| D3 | No idempotency key on the provider call, and the mock provider is not idempotent, so a retry after charge-then-timeout would charge twice (masked today by D2). | `settlement_worker.py`, `mock_provider/main.py` | code | Stage 4 (payment id as provider key; `psp_sim`) |
-| D4 | If retries were exhausted, the payment would be marked `FAILED` even though the provider may have charged. A timeout means *unknown*, not failure. | `settlement_worker.py` | code | Stage 4 (stays `PROCESSING`; reconciliation decides) |
-| D5 | Retry backoff sleeps inside the consumer loop (`asyncio.sleep(2**n)`), blocking the partition, and retries are published straight to Kafka, bypassing the outbox. | `settlement_worker.py` | code | Stage 4 |
-| D6 | Provider URL hard-coded to `http://mock-payment-provider:8001/charge`; the configured `PAYMENT_PROVIDER_URL` / `http_client` base URL is unused. | `settlement_worker.py` | code | Stage 4 |
-| D7 | The consumer commits its offset in `finally` even when processing failed, so a crash or error drops the message (at-most-once on the error path). | `settlement_worker.py` `run_settlement_worker` | code | Stage 4 (dedup row recorded with the effect; sweeper as backstop) |
+| D2 | **Retries never run.** On a provider error the worker re-publishes `payment.initiated`; the retry calls `validate_transition(PROCESSING, PROCESSING)`, which raises, so the payment stays `PROCESSING` forever and the DLQ / `FAILED` path is unreachable. | `settlement_worker.py` | observed: `422: Invalid transition: processing → processing` after a provider timeout; payment stuck in `PROCESSING` | ✅ fixed — Stage 4 — charger + sweeper, retries scheduled in Postgres (ADR 0006) |
+| D3 | No idempotency key on the provider call, and the mock provider is not idempotent, so a retry after charge-then-timeout would charge twice (masked today by D2). | `settlement_worker.py`, `mock_provider/main.py` | code | ✅ fixed — Stage 4 — payment/refund id is the provider key; psp_sim is idempotent |
+| D4 | If retries were exhausted, the payment would be marked `FAILED` even though the provider may have charged. A timeout means *unknown*, not failure. | `settlement_worker.py` | code | ✅ fixed — Stage 4 — timeout is unknown; exhausted retries dead-letter and stay PROCESSING |
+| D5 | Retry backoff sleeps inside the consumer loop (`asyncio.sleep(2**n)`), blocking the partition, and retries are published straight to Kafka, bypassing the outbox. | `settlement_worker.py` | code | ✅ fixed — Stage 4 — no sleeps in the consumer; backoff via next_attempt_at |
+| D6 | Provider URL hard-coded to `http://mock-payment-provider:8001/charge`; the configured `PAYMENT_PROVIDER_URL` / `http_client` base URL is unused. | `settlement_worker.py` | code | ✅ fixed — Stage 4 — PSP_BASE_URL setting |
+| D7 | The consumer commits its offset in `finally` even when processing failed, so a crash or error drops the message (at-most-once on the error path). | `settlement_worker.py` `run_settlement_worker` | code | ✅ fixed — Stage 4 — dedup row written with the effect; sweeper backstops lost events |
 
 ### Events and dedup (fixed in Stage 5)
 
 | # | Defect | Where | Evidence | Fixed by |
 |---|---|---|---|---|
-| D8 | Consumer dedup keys on Kafka topic/partition/offset (`uuid5`), so an event republished by the poller gets a new offset and is **not** deduplicated. | `settlement_worker.compute_event_id` | code | Stage 5 (dedup on outbox event id) |
+| D8 | Consumer dedup keys on Kafka topic/partition/offset (`uuid5`), so an event republished by the poller gets a new offset and is **not** deduplicated. | `settlement_worker.compute_event_id` | code | ✅ fixed — Stage 4 — outbox id sent as a Kafka header; charger dedups on it |
 | D9 | Outbox poller: no `ORDER BY`, no row lock (two replicas double-publish), no message key (no per-payment ordering), topic = event type, and a failed send is skipped while later rows are still marked published. | `app/services/outbox_poller.py` | code | Stage 5 (ADR 0005) |
 | D10 | Webhook endpoint accepts any body: no signature, no storage, no dedup, no effect. | `app/routers/webhooks.py` | code | Stage 5 |
 
@@ -45,7 +45,7 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 
 | # | Defect | Where | Evidence | Fixed by |
 |---|---|---|---|---|
-| D19 | Workers never call `setup_logging()`, so their logs are not JSON. | `app/workers/*` | observed | Stage 4/5 when the workers are rewritten |
+| D19 | Workers never call `setup_logging()`, so their logs are not JSON. | `app/workers/*` | observed | ✅ fixed — Stage 4 — charger and sweeper call setup_logging |
 | D20 | SQLAlchemy engine created with `echo=True`: every statement and its parameters are logged, in production too. | `app/core/database.py` | observed | ✅ fixed — Stage 1 (drive from settings) |
 | D21 | `/health` opens a new Kafka admin client on every call (Railway polls it). | `app/routers/health.py` | code | Stage 9 (split liveness/readiness) |
 | D22 | CHANGELOG/README claims are stale: `docker-compose.test.yml` (never existed), Python 3.11, PostgreSQL 15, "Redis Sentinel" mitigation. | `CHANGELOG.md`, `README.md`, `DESIGN.md` | code | Stage 8 rewrite |
@@ -81,10 +81,20 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | # | Item | Where | Stage |
 |---|---|---|---|
 | S3-1 | **Fixed in Stage 3.** A v1 payment (no wallet) reaching the worker would be charged, then fail to record the capture, then be retried and charged again. The worker now skips wallet-less payments *before* calling the provider. | `workers/settlement_worker.py` | done |
-| S3-2 | Refunds stay `PENDING` until Stage 4: nothing calls the provider for them yet. `start_refund_processing` and `apply_refund_result` are ready for the charger. | — | 4 |
+| S3-2 | Refunds stayed `PENDING` after Stage 3. **Done in Stage 4** (the charger sends them). | — | done |
 | S3-3 | `payment.initiated` is still published straight to the topic named after the event type; Stage 5 consolidates topics (`payments.v1`, …). New event types (`payment.captured`, `payment.failed`, `payment.refunded`, `refund.*`) follow the same v1 pattern until then. | outbox | 5 |
 | S3-4 | v1 payments keep `wallet_id = NULL` and are excluded from I4. They cannot be refunded through `/v1/refunds`. | — | — |
-| S3-5 | The v1 retry path (D2) and in-loop sleeps (D5) are untouched: a provider timeout still leaves the payment `PROCESSING`. | `workers/settlement_worker.py` | 4 |
+| S3-5 | v1 retry path (D2) and in-loop sleeps (D5). **Done in Stage 4** (v1 worker removed). | — | done |
+
+## Found during Stage 4
+
+| # | Item | Where | Stage |
+|---|---|---|---|
+| S4-1 | The charger handles one Kafka message at a time; a first attempt that times out holds the consumer for `PSP_TIMEOUT_SECONDS` (20 lost responses took ~40 s). Measure at Stage 8; options are a bounded in-process pool or more partitions and replicas. | `workers/charger.py` | 8 |
+| S4-2 | `dlq.v1` has no consumer. Add the "DLQ growing" runbook and an alert on `dlq_depth`. | — | 8 |
+| S4-3 | v1 rows in `processed_events` (consumer group `settlement-worker`) are inert and can be deleted. They caused real duplicates-skipped after the Stage 0 Kafka reset (see D8). | — | — |
+| S4-4 | `psp_sim` has no authentication; it must never be exposed beyond the compose network. | `psp_sim/` | 8 |
+| S4-5 | v1's `PAYMENT_PROVIDER_URL` is no longer read; compose sets `PSP_BASE_URL` for the charger and sweeper. | `.env` | — |
 
 ## Parked ideas (not in any current stage)
 

@@ -12,6 +12,52 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 4 — Hostile PSP simulator + charger
+
+**Added**
+- `psp_sim/`: a payment provider simulator with idempotent charges and
+  refunds (a reused key returns the original result; a reused key with a
+  different body is 422), lookup by id and merchant reference, a ground-truth
+  endpoint, and seeded fault profiles: decline, slow, unavailable (503),
+  charge-then-timeout and refund-then-timeout (record, then hang). Faults hit
+  only the first request for a key. State is SQLite on a volume, so it
+  survives restarts. Admin API: `GET|PUT /admin/faults`, `POST /admin/reset`.
+- `app/workers/charger.py`: lease → call → apply for `payment.initiated`
+  and `refund.created`, with the payment/refund id as the provider key. A
+  timeout or 5xx schedules a retry in Postgres (exponential backoff with
+  jitter). After `PSP_MAX_ATTEMPTS`, it writes one `dlq.v1` event and leaves
+  the row `PROCESSING` (ADR 0006).
+- `app/workers/sweeper.py`: claims due retries, expired leases and `PENDING`
+  rows whose event was lost (`FOR UPDATE SKIP LOCKED`), then re-drives them.
+  Pre-ledger payments are never claimed.
+- `app/clients/psp.py`: explicit timeouts. Unknown outcomes raise
+  `PspUnavailable`; refusals raise `PspRejected`.
+- `app/core/failpoints.py`: crash points (`exit` = `os._exit(137)`,
+  `raise` for in-process tests), armed by `FAILPOINTS`, never in production.
+- Outbox poller sends `event_id` and `event_type` as Kafka headers; the
+  charger deduplicates on the outbox id (not on offsets).
+- Indexes for the sweeper (migration `e6c1a9d4b582`).
+- `verification`: I3 (one payment per key in the database; one provider
+  charge per payment in the ground truth).
+- ADR 0006: retries scheduled in Postgres. Metric
+  `charger_attempts_total{kind,result}`.
+
+**Removed**
+- `app/workers/settlement_worker.py`, `mock_provider/`,
+  `app/core/http_client.py` and their tests. Compose replaces
+  `settlement_worker` and `mock-payment-provider` with `charger`, `sweeper`
+  and `psp-sim`.
+
+**Changed**
+- Settings: `PSP_BASE_URL` replaces `PAYMENT_PROVIDER_URL`;
+  `PSP_MAX_ATTEMPTS` replaces `PAYMENT_MAX_RETRIES`; new `PSP_TIMEOUT_SECONDS`,
+  `PSP_LEASE_SECONDS`, `PSP_RETRY_*`, `SWEEPER_*`, `FAILPOINTS`.
+
+**Measured**: charge-then-timeout at 100% → every payment `CAPTURED` with
+exactly one charge (10 in-process, 20 on the full stack); charger killed at
+the after-charge failpoint and restarted → `CAPTURED`, one charge; provider
+down → one DLQ event, payment `PROCESSING`, no charge.
+
 ### Stage 3 — Lifecycle on the ledger + refunds
 
 **Breaking**
