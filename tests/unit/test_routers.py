@@ -226,19 +226,43 @@ async def test_health_returns_200(client: AsyncClient) -> None:
     assert resp.json()["status"] == "ok"
 
 
-# POST /v1/webhooks (placeholder until Stage 5)
+# POST /v1/webhooks/psp: rejected before anything is stored (the signed path
+# against a real database is in tests/integration/test_webhooks.py)
 
 
 @pytest.mark.asyncio
-async def test_webhook_settled_returns_200(client: AsyncClient) -> None:
+async def test_unsigned_webhook_is_rejected(app: Any, client: AsyncClient) -> None:
+    from app.config import get_settings
+    from app.dependencies import get_settings_dep
+
+    settings = get_settings().model_copy(update={"PSP_WEBHOOK_SECRET": "s3cret"})
+    app.dependency_overrides[get_settings_dep] = lambda: settings
+    resp = await client.post("/v1/webhooks/psp", json={"id": "evt_1"})
+    assert resp.status_code == 400
+    assert "PSP-Signature" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_without_a_configured_secret_fails_closed(
+    app: Any, client: AsyncClient
+) -> None:
+    from app.config import get_settings
+    from app.core.security import sign_webhook
+    from app.dependencies import get_settings_dep
+
+    settings = get_settings().model_copy(update={"PSP_WEBHOOK_SECRET": ""})
+    app.dependency_overrides[get_settings_dep] = lambda: settings
+    body = b'{"id":"evt_1","type":"charge.succeeded","data":{}}'
     resp = await client.post(
-        "/v1/webhooks", json={"transaction_id": "ref-123", "status": "settled"}
+        "/v1/webhooks/psp",
+        content=body,
+        headers={"PSP-Signature": sign_webhook("", body, 0)},
     )
-    assert resp.status_code == 200
-    assert resp.json()["received"] is True
+    assert resp.status_code == 400
+    assert "not configured" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_webhook_invalid_body_returns_422(client: AsyncClient) -> None:
-    resp = await client.post("/v1/webhooks", json={})
-    assert resp.status_code == 422
+async def test_old_placeholder_webhook_route_is_gone(client: AsyncClient) -> None:
+    resp = await client.post("/v1/webhooks", json={"transaction_id": "x"})
+    assert resp.status_code in (404, 405)

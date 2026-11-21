@@ -45,6 +45,22 @@ class Settings(BaseSettings):
     SWEEPER_BATCH_SIZE: int = 50
     # PENDING this long means the payment.initiated event was lost
     SWEEPER_PENDING_AFTER_SECONDS: float = 60.0
+    # Provider webhooks: HMAC secret shared with the provider, and how far a
+    # signature timestamp may be from our clock before the request is refused.
+    PSP_WEBHOOK_SECRET: str = ""  # empty rejects every webhook (fail closed)
+    PSP_WEBHOOK_TOLERANCE_SECONDS: float = 300.0
+    WEBHOOK_MAX_BODY_BYTES: int = 65536
+    # Webhook processor: events that cannot apply yet are parked and retried
+    WEBHOOK_POLL_SECONDS: float = 0.5
+    WEBHOOK_BATCH_SIZE: int = 50
+    WEBHOOK_MAX_ATTEMPTS: int = 10  # then dead + dlq.v1
+    WEBHOOK_RETRY_BASE_SECONDS: float = 1.0
+    WEBHOOK_RETRY_MAX_SECONDS: float = 300.0
+    # Outbox relay (ADR 0005): one leader holds an advisory lock and wakes on
+    # NOTIFY; the fallback poll covers a missed notification, and standbys try
+    # for the lock this often, so it also bounds failover time.
+    OUTBOX_BATCH_SIZE: int = 100
+    OUTBOX_FALLBACK_POLL_SECONDS: float = 5.0
     # Crash points for testing, e.g. "charger.after_provider_call=exit".
     # Ignored when APP_ENV=production.
     FAILPOINTS: str = ""

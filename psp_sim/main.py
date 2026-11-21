@@ -6,6 +6,11 @@
     GET  /charges?merchant_reference=...
     GET  /ground-truth  everything actually charged and refunded
     GET|PUT /admin/faults, POST /admin/reset, GET /health
+    GET  /admin/webhooks[?status=], POST /admin/webhooks/{id}/redeliver,
+    POST /admin/webhooks/drain  deliver every pending webhook now
+
+Every recorded charge and refund also produces a signed webhook (see
+webhooks.py) when PSP_SIM_WEBHOOK_URL is set.
 
 Faults apply only to the first request for a key. A replay is answered from
 the store immediately, which is what makes charge-then-timeout recoverable:
@@ -13,9 +18,11 @@ the charge happened, the response was lost, asking again returns it.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -24,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from psp_sim.faults import FaultProfile, Faults
 from psp_sim.store import Store
+from psp_sim.webhooks import Sender, WebhookDispatcher
 
 
 class ChargeRequest(BaseModel):
@@ -35,6 +43,10 @@ class ChargeRequest(BaseModel):
 class RefundRequest(BaseModel):
     charge_id: str
     amount: int = Field(gt=0, strict=True)
+    # The merchant's own refund id, echoed in webhooks. Metadata: it is not
+    # part of the request fingerprint, so a retry from an older client that
+    # did not send it still replays instead of failing with 422.
+    merchant_reference: str | None = Field(default=None, max_length=128)
 
 
 class FaultsRequest(BaseModel):
@@ -45,11 +57,16 @@ class FaultsRequest(BaseModel):
     charge_then_timeout_rate: float = 0.0
     refund_fail_rate: float = 0.0
     refund_then_timeout_rate: float = 0.0
+    webhook_drop_rate: float = 0.0
+    webhook_duplicate_rate: float = 0.0
+    webhook_delay_max_seconds: float = 0.0
     seed: int | None = None
 
 
-def _fingerprint(body: BaseModel) -> str:
-    canonical = json.dumps(body.model_dump(), sort_keys=True, separators=(",", ":"))
+def _fingerprint(body: BaseModel, exclude: set[str] | None = None) -> str:
+    canonical = json.dumps(
+        body.model_dump(exclude=exclude), sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -57,6 +74,9 @@ def create_app(
     db_path: str | None = None,
     response_timeout_seconds: float | None = None,
     faults: Faults | None = None,
+    webhook_url: str | None = None,
+    webhook_secret: str | None = None,
+    webhook_sender: Sender | None = None,
 ) -> FastAPI:
     store = Store(db_path or os.environ.get("PSP_SIM_DB_PATH", ":memory:"))
     faults = faults or Faults(seed=int(os.environ.get("PSP_SIM_SEED", "0")))
@@ -65,9 +85,25 @@ def create_app(
         if response_timeout_seconds is not None
         else float(os.environ.get("PSP_SIM_RESPONSE_TIMEOUT_SECONDS", "30"))
     )
-    app = FastAPI(title="PSP simulator")
+    dispatcher = WebhookDispatcher(
+        store,
+        faults,
+        url=webhook_url or os.environ.get("PSP_SIM_WEBHOOK_URL") or None,
+        secret=webhook_secret or os.environ.get("PSP_SIM_WEBHOOK_SECRET", ""),
+        sender=webhook_sender,
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
+        task = asyncio.create_task(dispatcher.run()) if dispatcher.enabled else None
+        yield
+        if task is not None:
+            task.cancel()
+
+    app = FastAPI(title="PSP simulator", lifespan=lifespan)
     app.state.store = store
     app.state.faults = faults
+    app.state.webhooks = dispatcher
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -102,6 +138,10 @@ def create_app(
         )
         if not created:  # a concurrent first request won the insert
             return _replay(charge.fingerprint, fingerprint, charge.public())
+        # Recorded before the response, so a lost response still has a webhook
+        dispatcher.enqueue(
+            "charge.failed" if declined else "charge.succeeded", charge.public()
+        )
         if faults.roll(profile.charge_then_timeout_rate):
             await asyncio.sleep(hang)  # the charge is recorded; the answer is late
         return JSONResponse(charge.public(), status_code=201)
@@ -113,7 +153,7 @@ def create_app(
     ) -> JSONResponse:
         if not idempotency_key:
             raise HTTPException(400, "Idempotency-Key header is required")
-        fingerprint = _fingerprint(body)
+        fingerprint = _fingerprint(body, exclude={"merchant_reference"})
         existing = store.refund_by_key(idempotency_key)
         if existing is not None:
             return _replay(existing.fingerprint, fingerprint, existing.public())
@@ -144,9 +184,11 @@ def create_app(
             amount=body.amount,
             status=status,
             failure_reason=reason,
+            merchant_reference=body.merchant_reference,
         )
         if not created:
             return _replay(refund.fingerprint, fingerprint, refund.public())
+        dispatcher.enqueue(f"refund.{status}", refund.public())
         if faults.roll(profile.refund_then_timeout_rate):
             await asyncio.sleep(hang)
         return JSONResponse(refund.public(), status_code=201)
@@ -179,6 +221,20 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         return {**faults.profile.__dict__, "seed": faults.seed}
+
+    @app.get("/admin/webhooks")
+    async def list_webhooks(status: str | None = None) -> list[dict[str, Any]]:
+        return [w.public() for w in store.webhooks(status)]
+
+    @app.post("/admin/webhooks/{webhook_id}/redeliver")
+    async def redeliver(webhook_id: str) -> dict[str, Any]:
+        if not dispatcher.redeliver(webhook_id):
+            raise HTTPException(404, f"webhook {webhook_id} not found")
+        return {"status": "pending", "id": webhook_id}
+
+    @app.post("/admin/webhooks/drain")
+    async def drain_webhooks() -> dict[str, int]:
+        return {"accepted": await dispatcher.drain()}
 
     @app.post("/admin/reset")
     async def reset() -> dict[str, str]:

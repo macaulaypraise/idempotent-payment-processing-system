@@ -157,6 +157,7 @@ async def apply_psp_result(
         )
         payment.status = PaymentStatus.CAPTURED
         payment.psp_reference = outcome.psp_reference
+        payment.next_attempt_at = None  # nothing left to retry, whoever reported
         db.add(
             _event(
                 payment,
@@ -176,6 +177,7 @@ async def apply_psp_result(
             raise NotApplicableYetError(f"payment {payment.id} is not PROCESSING yet")
         payment.status = PaymentStatus.FAILED
         payment.psp_reference = outcome.psp_reference or payment.psp_reference
+        payment.next_attempt_at = None
         db.add(_event(payment, "payment.failed", source=source, reason=outcome.reason))
 
     await db.flush()
@@ -293,6 +295,7 @@ async def apply_refund_result(
         )
         refund.status = RefundStatus.SUCCEEDED
         refund.psp_reference = outcome.psp_reference
+        refund.next_attempt_at = None
         payment.status = PaymentStatus.REFUNDED
         db.add(_refund_event(refund, "refund.succeeded", source=source))
         db.add(
@@ -309,6 +312,7 @@ async def apply_refund_result(
         )
         refund.status = RefundStatus.FAILED
         refund.psp_reference = outcome.psp_reference or refund.psp_reference
+        refund.next_attempt_at = None
         db.add(
             _refund_event(refund, "refund.failed", source=source, reason=outcome.reason)
         )

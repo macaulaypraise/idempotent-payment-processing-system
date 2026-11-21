@@ -43,6 +43,7 @@ from app.clients.psp import (
     build_psp_client,
 )
 from app.config import Settings, get_settings
+from app.core.backoff import equal_jitter
 from app.core.clock import Clock, SystemClock
 from app.core.failpoints import failpoint
 from app.core.metrics import charger_attempts_total, dlq_depth
@@ -66,7 +67,10 @@ from app.services.psp_results import (
 logger = structlog.get_logger()
 
 CONSUMER_GROUP = "charger"
-TOPICS = ("payment.initiated", "refund.created")
+# Every payment and refund event shares payments.v1 (keyed by payment id, so
+# one payment's events stay in order); the charger acts on two of them.
+TOPICS = ("payments.v1",)
+HANDLED_EVENTS = ("payment.initiated", "refund.created")
 DLQ_EVENT = "dlq.v1"
 
 
@@ -114,17 +118,19 @@ class Charger:
         return self.clock.now() + timedelta(seconds=self.settings.PSP_LEASE_SECONDS)
 
     def backoff_seconds(self, attempts: int) -> float:
-        """Exponential backoff with equal jitter: half fixed, half random."""
-        ceiling = min(
+        return equal_jitter(
+            attempts,
+            self.settings.PSP_RETRY_BASE_SECONDS,
             self.settings.PSP_RETRY_MAX_SECONDS,
-            self.settings.PSP_RETRY_BASE_SECONDS * 2 ** max(attempts - 1, 0),
+            self.rng,
         )
-        return float(ceiling / 2 + self.rng.uniform(0, ceiling / 2))
 
     # --- entry points ---------------------------------------------------------
 
     async def handle(self, event: ChargerEvent) -> Result:
         """Process one decoded payment.initiated or refund.created event."""
+        if event.event_type not in HANDLED_EVENTS:
+            return Result.SKIPPED  # other payments.v1 events are not ours
         if event.event_id and await self._already_processed(event.event_id):
             return Result.DUPLICATE
         tenant_id = uuid.UUID(event.payload["tenant_id"])
@@ -132,12 +138,10 @@ class Charger:
             claim = await self._claim_payment(
                 tenant_id, uuid.UUID(event.payload["payment_id"])
             )
-        elif event.event_type == "refund.created":
+        else:  # refund.created
             claim = await self._claim_refund(
                 tenant_id, uuid.UUID(event.payload["refund_id"])
             )
-        else:
-            return Result.SKIPPED
         if claim is None:
             # Already claimed by an earlier delivery or the sweeper, finished,
             # or a pre-ledger payment: nothing for this event to do.
@@ -160,7 +164,10 @@ class Charger:
             else:
                 assert claim.charge_id is not None
                 result = await self.psp.refund(
-                    key=str(claim.id), charge_id=claim.charge_id, amount=claim.amount
+                    key=str(claim.id),
+                    charge_id=claim.charge_id,
+                    amount=claim.amount,
+                    merchant_reference=str(claim.id),
                 )
         except PspUnavailable as exc:
             return await self._schedule_retry(claim, str(exc))
@@ -407,8 +414,10 @@ def decode(
     topic: str, value: str, headers: list[tuple[str, bytes]] | None
 ) -> ChargerEvent:
     meta = {k: v.decode() for k, v in (headers or [])}
-    event_id = uuid.UUID(meta["event_id"]) if "event_id" in meta else None
-    return ChargerEvent(meta.get("event_type", topic), json.loads(value), event_id)
+    payload = json.loads(value)
+    raw_id = meta.get("event_id") or payload.get("event_id")
+    event_type = meta.get("event_type") or payload.get("event_type") or topic
+    return ChargerEvent(event_type, payload, uuid.UUID(raw_id) if raw_id else None)
 
 
 async def main() -> None:  # pragma: no cover - Kafka loop around handle()

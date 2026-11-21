@@ -75,10 +75,19 @@ class PspClient:
             decline_reason=data.get("decline_reason"),
         )
 
-    async def refund(self, *, key: str, charge_id: str, amount: int) -> RefundResult:
-        data = await self._post(
-            "/refunds", key, {"charge_id": charge_id, "amount": amount}
-        )
+    async def refund(
+        self,
+        *,
+        key: str,
+        charge_id: str,
+        amount: int,
+        merchant_reference: str | None = None,
+    ) -> RefundResult:
+        body: dict[str, Any] = {"charge_id": charge_id, "amount": amount}
+        if merchant_reference is not None:
+            # Echoed in the refund's webhooks, so they can be matched to us
+            body["merchant_reference"] = merchant_reference
+        data = await self._post("/refunds", key, body)
         return RefundResult(
             refund_id=str(data["id"]),
             succeeded=data["status"] == "succeeded",

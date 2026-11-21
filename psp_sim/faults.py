@@ -15,6 +15,9 @@ class FaultProfile:
     charge_then_timeout_rate: float = 0.0  # record the charge, then hang
     refund_fail_rate: float = 0.0  # refund answered "failed"
     refund_then_timeout_rate: float = 0.0  # record the refund, then hang
+    webhook_drop_rate: float = 0.0  # never send the webhook (until redelivered)
+    webhook_duplicate_rate: float = 0.0  # send the same webhook twice
+    webhook_delay_max_seconds: float = 0.0  # send after a random delay up to this
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
@@ -22,6 +25,8 @@ class FaultProfile:
                 raise ValueError(f"{name} must be within [0, 1], got {value}")
         if self.slow_seconds < 0:
             raise ValueError("slow_seconds must be >= 0")
+        if self.webhook_delay_max_seconds < 0:
+            raise ValueError("webhook_delay_max_seconds must be >= 0")
 
 
 class Faults:
@@ -57,3 +62,7 @@ class Faults:
         with self._lock:
             draw = self._rng.random()
         return draw < rate
+
+    def uniform(self, low: float, high: float) -> float:
+        with self._lock:
+            return self._rng.uniform(low, high)

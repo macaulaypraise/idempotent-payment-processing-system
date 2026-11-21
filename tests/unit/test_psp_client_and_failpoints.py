@@ -91,6 +91,20 @@ async def test_refund_maps_the_result() -> None:
     assert (result.refund_id, result.succeeded) == ("re_1", True)
 
 
+async def test_refund_sends_merchant_reference_only_when_given() -> None:
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "re_1", "status": "succeeded"})
+
+    client = _client(handler)
+    await client.refund(key="a", charge_id="ch_1", amount=100)
+    await client.refund(key="b", charge_id="ch_1", amount=100, merchant_reference="r1")
+    assert "merchant_reference" not in bodies[0]
+    assert bodies[1]["merchant_reference"] == "r1"
+
+
 # --- failpoints -----------------------------------------------------------------
 
 
@@ -162,3 +176,24 @@ def test_decode_reads_event_id_and_type_from_headers() -> None:
 def test_decode_without_headers_has_no_event_id() -> None:
     event = decode("refund.created", '{"refund_id": "r"}', None)
     assert event.event_id is None and event.event_type == "refund.created"
+
+
+def test_decode_falls_back_to_the_value_on_the_shared_topic() -> None:
+    event_id = uuid.uuid4()
+    value = json.dumps(
+        {"refund_id": "r", "event_id": str(event_id), "event_type": "refund.created"}
+    )
+    event = decode("payments.v1", value, [])
+    assert (event.event_id, event.event_type) == (event_id, "refund.created")
+
+
+async def test_charger_ignores_other_events_on_the_shared_topic() -> None:
+    from unittest.mock import MagicMock
+
+    from app.workers.charger import Charger, ChargerEvent, Result
+
+    factory = MagicMock(side_effect=AssertionError("must not touch the database"))
+    charger = Charger(factory, MagicMock(), MagicMock(), MagicMock())
+    for event_type in ("payment.captured", "refund.succeeded", "payment.refunded"):
+        event = ChargerEvent(event_type, {"payment_id": "p"}, uuid.uuid4())
+        assert await charger.handle(event) is Result.SKIPPED

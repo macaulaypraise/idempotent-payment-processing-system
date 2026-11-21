@@ -145,6 +145,9 @@ services:
     container_name: fastapi-app
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Must match the simulator's PSP_SIM_WEBHOOK_SECRET below
+      PSP_WEBHOOK_SECRET: ${PSP_WEBHOOK_SECRET:-local-dev-webhook-secret}
     ports:
       - "8000:8000"
     depends_on:
@@ -154,8 +157,10 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
-      # Hostile PSP simulator (psp_sim/). Its SQLite store is the ground truth of
-  # what was really charged, kept on a volume so it survives restarts.
+
+  # Hostile PSP simulator (psp_sim/). Its SQLite store is the ground truth of
+  # what was really charged, kept on a volume so it survives restarts. It
+  # sends signed webhooks to the API (retried until the API is up).
   psp-sim:
     build:
       context: .
@@ -169,6 +174,8 @@ services:
     environment:
       PSP_SIM_DB_PATH: /data/psp_sim.db
       PSP_SIM_RESPONSE_TIMEOUT_SECONDS: "30"
+      PSP_SIM_WEBHOOK_URL: http://api:8000/v1/webhooks/psp
+      PSP_SIM_WEBHOOK_SECRET: ${PSP_WEBHOOK_SECRET:-local-dev-webhook-secret}
     volumes:
       - psp-sim-data:/data
     healthcheck:
@@ -178,6 +185,8 @@ services:
       retries: 5
       start_period: 10s
 
+  # Two replicas: one holds the advisory lock and publishes, the other waits
+  # to take over (ADR 0005). Woken by NOTIFY; polls as a fallback.
   outbox_poller:
     build:
       context: .
@@ -186,13 +195,27 @@ services:
     command: .venv/bin/python -m app.workers.outbox_poller
     restart: unless-stopped
     env_file: .env
+    deploy:
+      replicas: 2
     depends_on:
       migrate:
         condition: service_completed_successfully
       kafka:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+
+  # Applies stored provider webhooks (the inbox) through the same entry point
+  # the charger uses.
+  webhook_processor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    command: .venv/bin/python -m app.workers.webhook_processor
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   # Calls the PSP for payment.initiated and refund.created events.
   charger:

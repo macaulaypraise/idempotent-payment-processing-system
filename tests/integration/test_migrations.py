@@ -89,3 +89,38 @@ async def test_v1_rows_survive_upgrade_and_downgrade(scratch_url: str) -> None:
         scratch_url, f"SELECT amount FROM payments WHERE id = '{payment_id}'"
     )
     assert str(amount_after) == "10.50"
+
+
+async def test_outbox_backlog_is_numbered_oldest_first(scratch_url: str) -> None:
+    """Stage 5 adds outbox_events.seq: rows already waiting are numbered by
+    created_at (not physical order), and new rows continue after them."""
+    await asyncio.to_thread(command.upgrade, _alembic(scratch_url), "e6c1a9d4b582")
+    for name, age in (("middle", 2), ("newest", 1), ("oldest", 3)):
+        await _execute(
+            scratch_url,
+            "INSERT INTO outbox_events (id, tenant_id, event_type, payload, created_at) "
+            f"VALUES ('{uuid.uuid4()}', '{DEFAULT_TENANT_ID}', '{name}', '{{}}', "
+            f"now() - interval '{age} minutes')",
+        )
+
+    await asyncio.to_thread(command.upgrade, _alembic(scratch_url), "head")
+    await _execute(
+        scratch_url,
+        "INSERT INTO outbox_events (id, tenant_id, event_type, payload, created_at) "
+        f"VALUES ('{uuid.uuid4()}', '{DEFAULT_TENANT_ID}', 'after', '{{}}', now())",
+    )
+    rows = await _query(
+        scratch_url, "SELECT event_type, seq FROM outbox_events ORDER BY seq"
+    )
+    assert rows == [("oldest", 1), ("middle", 2), ("newest", 3), ("after", 4)]
+
+    await asyncio.to_thread(command.downgrade, _alembic(scratch_url), "e6c1a9d4b582")
+    tables = {
+        r[0]
+        for r in await _query(
+            scratch_url,
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public'",
+        )
+    }
+    assert "webhook_events" not in tables

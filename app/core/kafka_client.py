@@ -26,8 +26,14 @@ def _kafka_ssl_kwargs() -> dict[str, Any]:
 
 
 async def create_kafka_producer() -> AIOKafkaProducer:
+    # Idempotent with acks=all: the broker drops the duplicate a producer
+    # retry would otherwise write, and an acknowledged send survives the loss
+    # of a broker. Ordering per partition holds across retries.
     producer = AIOKafkaProducer(
-        bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS, **_kafka_ssl_kwargs()
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+        enable_idempotence=True,
+        acks="all",
+        **_kafka_ssl_kwargs(),
     )
     await producer.start()
     return producer

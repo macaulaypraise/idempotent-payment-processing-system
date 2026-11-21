@@ -87,7 +87,8 @@ async def test_outbox_published_after_poll(
     unpublished = result.scalars().all()
     assert len(unpublished) == 1
 
-    processed_count, _ = await poll_and_publish(db_session, mock_kafka_producer)
+    processed_count, _, failed = await poll_and_publish(db_session, mock_kafka_producer)
+    assert not failed
     assert processed_count == 1
 
     await db_session.refresh(unpublished[0])
@@ -102,7 +103,7 @@ async def test_poll_returns_zero_on_empty_outbox(
     db_session: AsyncSession, mock_kafka_producer: Any
 ) -> None:
     """poll_and_publish on an empty outbox must return (0, 0.0)."""
-    count, lag = await poll_and_publish(db_session, mock_kafka_producer)
+    count, lag, _ = await poll_and_publish(db_session, mock_kafka_producer)
     assert count == 0
     assert lag == 0.0
     mock_kafka_producer.send_and_wait.assert_not_awaited()
@@ -137,11 +138,13 @@ async def test_payment_row_persisted_correctly(
 async def test_poll_publishes_to_correct_kafka_topic(
     db_session: AsyncSession, redis_client: Redis, mock_kafka_producer: Any
 ) -> None:
-    """Outbox poller must publish to the payment.initiated topic."""
+    """payment.* events go to payments.v1, keyed by payment id."""
     await create_payment(db_session, redis_client, "key-topic-001", 50.00, "USD")
     await poll_and_publish(db_session, mock_kafka_producer)
 
     mock_kafka_producer.send_and_wait.assert_awaited_once()
     call_args = mock_kafka_producer.send_and_wait.call_args
     topic = call_args[0][0] if call_args[0] else call_args[1].get("topic")
-    assert "payment" in topic
+    assert topic == "payments.v1"
+    payment_id = (await db_session.execute(select(Payment.id))).scalar_one()
+    assert call_args.kwargs["key"] == str(payment_id).encode()

@@ -1,4 +1,4 @@
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 # payments_created_total tracks every payment creation outcome
 payments_created_total = Counter(
@@ -53,3 +53,24 @@ psp_results_total = Counter(
 charger_attempts_total = Counter(
     "charger_attempts_total", "Provider calls made by the charger", ["kind", "result"]
 )
+
+# Webhook ingestion: stored | duplicate | bad_signature | malformed | too_large
+webhooks_received_total = Counter(
+    "webhooks_received_total", "Provider webhook requests by result", ["result"]
+)
+
+# Webhook processing: processed | already_applied | parked | dead | ignored
+webhooks_processed_total = Counter(
+    "webhooks_processed_total",
+    "Stored webhook events handled by the processor",
+    ["event_type", "result"],
+)
+
+# created_at -> published_at for every outbox event the relay publishes
+outbox_publish_lag_seconds = Histogram(
+    "outbox_publish_lag_seconds",
+    "Seconds from outbox insert to Kafka acknowledgement",
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
+)
+
+outbox_leader = Gauge("outbox_leader", "1 while this relay holds the outbox lock")

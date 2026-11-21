@@ -6,6 +6,7 @@ from app.models.processed_event import ProcessedEvent
 from app.models.refund import Refund, RefundStatus
 from app.models.tenant import DEFAULT_TENANT_ID, ApiKey, Tenant
 from app.models.wallet import Wallet
+from app.models.webhook_event import WebhookEvent, WebhookStatus
 
 __all__ = [
     "DEFAULT_TENANT_ID",
@@ -24,4 +25,6 @@ __all__ = [
     "Tenant",
     "Transfer",
     "Wallet",
+    "WebhookEvent",
+    "WebhookStatus",
 ]

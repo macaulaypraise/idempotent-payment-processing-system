@@ -1,6 +1,7 @@
 """Unit tests for app/core/security.py and app/core/db_errors.py."""
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -82,3 +83,81 @@ def test_constraint_name_lookup_and_fallback() -> None:
     assert not violates_constraint(exc, "uq_y")
     assert violates_constraint(Exception('violates "uq_z"'), "uq_z")
     assert pg_constraint_name(Exception("plain")) is None
+
+
+# --- webhook signatures ------------------------------------------------------------
+
+SECRET = "whsec_test"
+BODY = b'{"id":"evt_1","type":"charge.succeeded","data":{}}'
+
+
+def test_signature_format_matches_an_independent_computation() -> None:
+    """Pinned against hmac directly, so a bug shared by the signer (used by
+    the simulator) and the verifier cannot pass unnoticed."""
+    import hashlib
+    import hmac as std_hmac
+
+    from app.core.security import sign_webhook
+
+    expected = std_hmac.new(
+        SECRET.encode(), b"1700000000." + BODY, hashlib.sha256
+    ).hexdigest()
+    assert sign_webhook(SECRET, BODY, 1_700_000_000) == f"t=1700000000,v1={expected}"
+
+
+def test_valid_signature_verifies_and_returns_the_timestamp() -> None:
+    from app.core.security import sign_webhook, verify_webhook
+
+    header = sign_webhook(SECRET, BODY, 1_000)
+    assert (
+        verify_webhook(SECRET, BODY, header, now=1_010, tolerance_seconds=300) == 1_000
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda h, b: (h, b + b" "), "mismatch"),  # body tampered
+        (lambda h, b: (h.replace("t=1000", "t=1001"), b), "mismatch"),  # ts edited
+        (lambda h, b: (h[:-1] + ("0" if h[-1] != "0" else "1"), b), "mismatch"),
+        (lambda h, b: ("v1=abc", b), "needs t= and v1="),
+        (lambda h, b: ("t=abc,v1=abc", b), "malformed signature timestamp"),
+        (lambda h, b: ("garbage", b), "malformed signature header"),
+        (lambda h, b: (None, b), "missing"),
+        (lambda h, b: ("", b), "missing"),
+    ],
+)
+def test_bad_signatures_are_rejected(mutate: Any, message: str) -> None:
+    from app.core.security import SignatureError, sign_webhook, verify_webhook
+
+    header, body = mutate(sign_webhook(SECRET, BODY, 1_000), BODY)
+    with pytest.raises(SignatureError, match=message):
+        verify_webhook(SECRET, body, header, now=1_000, tolerance_seconds=300)
+
+
+@pytest.mark.parametrize("now", [1_000 + 301, 1_000 - 301])  # stale, and future
+def test_timestamps_outside_tolerance_are_rejected(now: int) -> None:
+    from app.core.security import SignatureError, sign_webhook, verify_webhook
+
+    header = sign_webhook(SECRET, BODY, 1_000)
+    with pytest.raises(SignatureError, match="tolerance"):
+        verify_webhook(SECRET, BODY, header, now=now, tolerance_seconds=300)
+
+
+def test_wrong_secret_and_empty_secret_are_rejected() -> None:
+    from app.core.security import SignatureError, sign_webhook, verify_webhook
+
+    header = sign_webhook(SECRET, BODY, 1_000)
+    with pytest.raises(SignatureError, match="mismatch"):
+        verify_webhook("other", BODY, header, now=1_000, tolerance_seconds=300)
+    with pytest.raises(SignatureError, match="not configured"):
+        verify_webhook("", BODY, header, now=1_000, tolerance_seconds=300)
+
+
+def test_any_of_several_v1_values_is_accepted_for_secret_rotation() -> None:
+    from app.core.security import sign_webhook, verify_webhook
+
+    new = sign_webhook(SECRET, BODY, 1_000)
+    old = sign_webhook("old_secret", BODY, 1_000).split(",")[1]
+    header = f"{new.split(',')[0]},{old},{new.split(',')[1]}"
+    assert verify_webhook(SECRET, BODY, header, now=1_000, tolerance_seconds=300)
