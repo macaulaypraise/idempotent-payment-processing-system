@@ -49,3 +49,18 @@ def test_harness_catches_a_planted_bug(harness: machine.Harness) -> None:
             machine.LedgerlineMachine, settings=settings.get_profile("selftest")
         )
     print(f"\nplanted bug found after {harness.examples} histories")
+
+
+def test_the_machine_is_deterministic(harness: machine.Harness) -> None:
+    """The same choices must give the same history, or Hypothesis cannot
+    replay or shrink a failure (it raises FlakyStrategyDefinition). Two
+    derandomized runs must agree on everything the histories did."""
+    profile = settings(
+        settings.get_profile("pr"), max_examples=8, database=None, derandomize=True
+    )
+    run_state_machine_as_test(machine.LedgerlineMachine, settings=profile)
+    first = dict(harness.stats)
+    harness.stats.clear()
+    run_state_machine_as_test(machine.LedgerlineMachine, settings=profile)
+    assert dict(harness.stats) == first
+    assert first["provider charges"] > 0  # the runs did real work

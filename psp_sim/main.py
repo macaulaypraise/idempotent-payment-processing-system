@@ -24,7 +24,7 @@ import contextlib
 import hashlib
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import date
 from typing import Annotated, Any, Literal
 
@@ -94,7 +94,11 @@ def create_app(
     webhook_url: str | None = None,
     webhook_secret: str | None = None,
     webhook_sender: Sender | None = None,
+    delay: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> FastAPI:
+    """`delay` is how a slow or lost response waits. In-process tests that
+    must replay exactly pass one that raises TimeoutError at once: the client
+    sees the same timeout, and no wall clock decides whether it fired."""
     store = Store(db_path or os.environ.get("PSP_SIM_DB_PATH", ":memory:"))
     faults = faults or Faults(seed=int(os.environ.get("PSP_SIM_SEED", "0")))
     hang = (
@@ -142,7 +146,7 @@ def create_app(
         if faults.roll(profile.unavailable_rate):
             raise HTTPException(503, "provider unavailable")
         if faults.roll(profile.slow_rate):
-            await asyncio.sleep(profile.slow_seconds)
+            await delay(profile.slow_seconds)
         declined = faults.roll(profile.decline_rate)
         charge, created = store.insert_charge(
             key=idempotency_key,
@@ -160,7 +164,7 @@ def create_app(
             "charge.failed" if declined else "charge.succeeded", charge.public()
         )
         if faults.roll(profile.charge_then_timeout_rate):
-            await asyncio.sleep(hang)  # the charge is recorded; the answer is late
+            await delay(hang)  # the charge is recorded; the answer is late
         return JSONResponse(charge.public(), status_code=201)
 
     @app.post("/refunds")
@@ -185,7 +189,7 @@ def create_app(
         if faults.roll(profile.unavailable_rate):
             raise HTTPException(503, "provider unavailable")
         if faults.roll(profile.slow_rate):
-            await asyncio.sleep(profile.slow_seconds)
+            await delay(profile.slow_seconds)
         if charge.status != "succeeded":
             status, reason = "failed", "charge_not_succeeded"
         elif store.succeeded_refund_for(charge.id) is not None:
@@ -207,7 +211,7 @@ def create_app(
             return _replay(refund.fingerprint, fingerprint, refund.public())
         dispatcher.enqueue(f"refund.{status}", refund.public())
         if faults.roll(profile.refund_then_timeout_rate):
-            await asyncio.sleep(hang)
+            await delay(hang)
         return JSONResponse(refund.public(), status_code=201)
 
     @app.get("/charges/{charge_id}")

@@ -52,7 +52,12 @@ proof that the harness can find a bug at all.
   tests. Network faults and process kills arrive with part 2.
 - A planted bug the invariants cannot see (a dropped webhook healed by the
   sweeper) is documented, not hidden: defence in depth masks it.
-- PR CI gains ~30 s; the nightly run takes ~6 minutes on a laptop.
+- **Every history must replay exactly** (Hypothesis rejects a run whose
+  same choices behave differently). So nothing outside Hypothesis's choices
+  may decide an outcome: seeds are fixed or drawn, harness workers run one
+  item at a time, and lost responses are injected, not timed. Learned the
+  hard way (docs/verification.md, 2026-11-22).
+- PR CI gains ~40 s; the nightly run takes ~6–11 minutes on a laptop.
 
 ## What would change my mind
 

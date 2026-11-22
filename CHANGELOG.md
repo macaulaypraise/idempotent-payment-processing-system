@@ -49,6 +49,16 @@ the sweeper and reconciliation, documented).
 faults cleared before in-flight work met them; Redis always up hid the
 Postgres replay path; a fixed worker order hid retry bugs.
 
+**Fixed after the first local nightly run (2026-11-22):** histories were not
+replayable under load (`FlakyStrategyDefinition` after 384 histories on
+WSL2; reproduced in the sandbox under CPU load). Worker RNGs are fixed per
+example, the simulator's seed is drawn by a rule, the harness's sweeper and
+webhook processor run one item at a time, the fake clock runs an hour ahead
+of the database clock, and lost responses no longer race a wall-clock
+timeout: `psp_sim.create_app(delay=…)` lets the harness raise `TimeoutError`
+exactly where the response goes missing. New rule: refund a payment that is
+refundable now. New test: `test_the_machine_is_deterministic`.
+
 ### Stage 6 — Reconciliation
 
 **Added**

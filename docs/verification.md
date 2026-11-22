@@ -27,7 +27,7 @@ system in-process, against the real database:
 
 | Kind | Rules |
 |---|---|
-| Client | create wallet (up to 3), create payment, retry it with the same key and body, retry it with the same key and a different body, request a refund, retry it, transfer between wallets |
+| Client | create wallet (up to 3), create payment, retry it with the same key and body, retry it with the same key and a different body, request a refund of any payment (mostly too early: 422), refund a payment that is refundable now, retry a refund, transfer between wallets |
 | Worker | publish one outbox batch, consume any queued event (in any order, sometimes leaving it queued to be delivered again), sweep with the clock advanced 5 s / 90 s / 400 s, deliver any pending webhook (in any order, sometimes twice), run the webhook processor, reconcile |
 | Fault | switch the provider to: no faults, lost responses, declines and failed refunds, unavailable, slow, webhook chaos (drop, duplicate, delay + lost responses); Redis up or down for the whole history |
 | Quiesce | one pass of every worker under the current faults, then the provider recovers and every worker runs until nothing changes; reconcile every date (sweeper first or webhooks first, either order) |
@@ -98,6 +98,8 @@ harness run, edit reverted):
 
 | Run | Histories | Steps checked | Provider charges | Violations |
 |---|---|---|---|---|
+| Nightly profile, sandbox under CPU load, 2026-11-22 (deterministic machine) | 367 | 8,874 | 1,023 (287 refunds) | 0 |
+| Nightly profile, developer's WSL2, 2026-11-22 (before the fix) | 384 | 8,808 | 1,050 | 0, then not replayable (see bug log) |
 | Nightly profile, sandbox, 2026-11-21 | 400 | 9,026 | 1,614 (132 refunds) | 0 |
 | PR profile | ~20 | ~450 | ~85 | 0 |
 
@@ -108,7 +110,8 @@ down in 188 of the histories. The README quotes the nightly job's summary
 
 ## What is not checked (yet, or here)
 
-- **Concurrency.** The machine is sequential: one step at a time. Races
+- **Concurrency.** The machine is sequential, and its workers process one
+  item at a time (so that every history replays exactly). Races
   (two requests with one key at once, processor against charger, two relay
   replicas) are covered by the integration tests of Stages 1, 3 and 5.
 - **Kafka, real networks, process crashes.** Stage 7 part 2 adds Toxiproxy
@@ -128,6 +131,48 @@ down in 188 of the histories. The README quotes the nightly job's summary
 
 Dated, newest first. Each entry: what failed, the minimal sequence, the fix,
 the regression test.
+
+### 2026-11-22 — Harness: histories were not replayable (FlakyStrategyDefinition)
+
+- **Found by:** the developer's local `make verify` on WSL2, after 384
+  histories (8,808 steps, 1,050 provider charges; no invariant violated).
+  Hypothesis replayed a prefix of choices and the system did something
+  different, so it stopped with `FlakyStrategyDefinition`. A history that
+  cannot be replayed cannot be shrunk or reproduced, so this blocks the
+  harness's main job.
+- **Cause:** five things outside Hypothesis's control changed outcomes
+  (whether a call timed out, a refund was accepted, a webhook was pending),
+  which changed the bundles and enabled rules for the same choices:
+  1. worker RNGs seeded from a run-wide counter (and shared between the
+     charger and the webhook processor);
+  2. the sweeper running claims concurrently: the simulator draws its fault
+     decisions from one seeded stream in request order, and concurrent
+     retries arrive in scheduler order, so a "lose this response" draw could
+     land on a different payment;
+  3. the webhook processor running four lanes concurrently;
+  4. a 50 ms client timeout racing ordinary in-process calls under load;
+  5. the sweeper comparing wall-clock `created_at` with the fake clock near
+     its 60 s grace boundary, so the answer depended on machine speed.
+- **Reproduced** in the sandbox only under CPU load (two busy loops):
+  the old machine failed the same way at history 260; idle, it passed.
+- **Fix:** fixed per-example seeds (the simulator's seed is now drawn by a
+  rule, so it is part of the replayed history); sweeper and webhook
+  processor run one item at a time in the harness; the fake clock runs an
+  hour ahead of the database clock; and no wall clock decides a lost
+  response: the simulator takes an injectable `delay`, which in the harness
+  raises `TimeoutError` at the moment the response would go missing (after
+  the charge is recorded), with the client's own timeout at 30 s.
+- **First attempt failed, honestly recorded:** replacing the 50 ms timeout
+  with 0.25 s still flaked under the same load (history 291): starved calls
+  exceeded it too. Only taking the wall clock out entirely held: 367
+  histories, 8,874 steps, under load, no flake.
+- **Regression test:** `test_the_machine_is_deterministic` runs eight
+  histories twice and requires identical outcomes. It guards the
+  deterministic parts (seeds, ordering); timing races only show under load,
+  so the nightly run remains the real check.
+- **Cost:** the machine no longer exercises concurrent sweeps or concurrent
+  webhook processing. Those races stay covered by the integration tests
+  (Stages 4 and 5); a concurrency rule is backlog S7-2.
 
 ### 2026-11-21 — Harness: faults were cleared before in-flight work met them
 

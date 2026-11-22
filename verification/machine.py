@@ -30,7 +30,7 @@ import random
 import uuid
 from collections import Counter
 from collections.abc import Coroutine
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -83,6 +83,21 @@ settings.register_profile(
 )
 
 WEBHOOK_SECRET = "whsec_harness"
+# A lost or slow response must be lost on every replay, and a normal one never.
+# No wall-clock race can promise that on a loaded machine (a 0.25 s timeout
+# still lost to CPU starvation), so the simulator's delay raises TimeoutError
+# at the moment the response would go missing, and the client's own timeout
+# is far beyond any in-process call.
+PSP_TIMEOUT_SECONDS = 30.0
+SIM_HANG_SECONDS = 5.0
+
+
+async def _response_lost(seconds: float) -> None:
+    raise TimeoutError(
+        f"simulated: no response within the client's timeout ({seconds}s)"
+    )
+
+
 UNREACHABLE_REDIS = "redis://127.0.0.1:1/0"  # refused at once: Redis is down
 # The provider can misbehave in these ways; a rule switches between them
 FAULT_PRESETS: dict[str, dict[str, Any]] = {
@@ -93,7 +108,7 @@ FAULT_PRESETS: dict[str, dict[str, Any]] = {
     },
     "declines": {"decline_rate": 0.5, "refund_fail_rate": 0.5},
     "unavailable": {"unavailable_rate": 0.7},
-    "slow": {"slow_rate": 0.5, "slow_seconds": 0.2},
+    "slow": {"slow_rate": 0.5, "slow_seconds": SIM_HANG_SECONDS},
     "webhook_chaos": {
         "webhook_drop_rate": 0.3,
         "webhook_duplicate_rate": 0.5,
@@ -215,11 +230,15 @@ class LedgerlineMachine(RuleBasedStateMachine):
         from psp_sim.main import create_app
 
         await database.reset(self.h.owner_url)
-        self.clock = FakeClock(datetime.now(UTC))
+        # The fake clock runs an hour ahead of the database's wall clock. The
+        # sweeper compares wall-clock created_at with this clock (its PENDING
+        # grace period); an hour ahead decides that comparison the same way on
+        # every replay, however fast the machine ran.
+        self.clock = FakeClock(datetime.now(UTC) + timedelta(hours=1))
         self.settings = get_settings().model_copy(
             update={
                 "PSP_WEBHOOK_SECRET": WEBHOOK_SECRET,
-                "PSP_TIMEOUT_SECONDS": 0.05,
+                "PSP_TIMEOUT_SECONDS": PSP_TIMEOUT_SECONDS,
                 "PSP_MAX_ATTEMPTS": 2,  # so exhaustion (dead-lettered) is reachable
                 "WEBHOOK_MAX_ATTEMPTS": 3,
                 "WEBHOOK_RETRY_MAX_SECONDS": 60.0,
@@ -260,10 +279,11 @@ class LedgerlineMachine(RuleBasedStateMachine):
 
         self.sim_app = create_app(
             db_path=":memory:",
-            response_timeout_seconds=0.2,
+            response_timeout_seconds=SIM_HANG_SECONDS,
             webhook_url="/v1/webhooks/psp",
             webhook_secret=WEBHOOK_SECRET,
             webhook_sender=sender,
+            delay=_response_lost,
         )
         self.dispatcher = self.sim_app.state.webhooks
         self.dispatcher.clock = lambda: self.clock.now().timestamp()
@@ -271,10 +291,21 @@ class LedgerlineMachine(RuleBasedStateMachine):
             transport=ASGITransport(app=self.sim_app), base_url="http://sim"
         )
         psp = PspClient(self.sim, timeout_seconds=self.settings.PSP_TIMEOUT_SECONDS)
-        rng = random.Random(self.h.examples)
-        self.charger = Charger(factory, psp, self.clock, self.settings, rng)
-        self.sweeper = Sweeper(factory, self.charger, self.clock, self.settings)
-        self.processor = WebhookProcessor(factory, self.clock, self.settings, rng)
+        # Determinism: a replay of the same choices must reproduce the same
+        # history (Hypothesis checks, and fails with FlakyStrategyDefinition).
+        # So every random source is fixed per example (the simulator's seed is
+        # drawn by a rule), and workers run one item at a time: the simulator
+        # decides faults in request order, and concurrent requests arrive in
+        # scheduler order.
+        self.charger = Charger(
+            factory, psp, self.clock, self.settings, random.Random(1)
+        )
+        self.sweeper = Sweeper(
+            factory, self.charger, self.clock, self.settings, concurrency=1
+        )
+        self.processor = WebhookProcessor(
+            factory, self.clock, self.settings, random.Random(2), concurrency=1
+        )
         self.reconciler = Reconciler(factory, psp, self.clock, self.settings)
 
         async with factory() as db:
@@ -342,10 +373,14 @@ class LedgerlineMachine(RuleBasedStateMachine):
         self.h.stats[f"redis {'up' if redis_up else 'down'}"] += 1
         self.history.record("fault", "redis", request={"up": redis_up})
 
-    @initialize(preset=st.sampled_from(sorted(FAULT_PRESETS)))
-    def first_faults(self, preset: str) -> None:
-        """Every history starts with the provider already misbehaving."""
-        self.set_faults(preset)
+    @initialize(
+        preset=st.sampled_from(sorted(FAULT_PRESETS)), seed=st.integers(0, 2**16)
+    )
+    def first_faults(self, preset: str, seed: int) -> None:
+        """Every history starts with the provider already misbehaving. The
+        simulator's fault seed is drawn here, so it is part of the history
+        Hypothesis replays and shrinks, not hidden state."""
+        self.set_faults(preset, seed=seed)
 
     @initialize(
         target=payments,
@@ -406,6 +441,38 @@ class LedgerlineMachine(RuleBasedStateMachine):
         if answer is None:
             return multiple()  # not capturable yet, or already refunded
         return Request("create_refund", "/v1/refunds", key, body, answer)
+
+    @precondition(lambda self: bool(self._refundable()))
+    @rule(target=refunds, pick=st.integers(0, 50))
+    def refund_a_captured_payment(self, pick: int) -> Any:
+        """Refund a payment that can be refunded right now. (request_refund
+        draws any payment, so most of its attempts are early and get 422.)"""
+        candidates = self._refundable()
+        body = {"payment_id": str(candidates[pick % len(candidates)])}
+        key = str(uuid.uuid4())
+        answer = self.h.run(self._call("create_refund", "/v1/refunds", key, body))
+        if answer is None:
+            return multiple()
+        return Request("create_refund", "/v1/refunds", key, body, answer)
+
+    def _refundable(self) -> list[uuid.UUID]:
+        """Captured or settled payments with no active or completed refund, in
+        a stable order (so the same pick means the same payment on replay)."""
+        from sqlalchemy import text
+
+        async def query() -> list[uuid.UUID]:
+            async with self.h.factory() as db:
+                rows = await db.execute(
+                    text(
+                        "SELECT p.id FROM payments p WHERE p.status IN "
+                        "('CAPTURED', 'SETTLED') AND NOT EXISTS (SELECT 1 FROM "
+                        "refunds r WHERE r.payment_id = p.id AND r.status <> 'FAILED') "
+                        "ORDER BY p.created_at, p.id"
+                    )
+                )
+                return [uuid.UUID(str(r[0])) for r in rows.all()]
+
+        return self.h.run(query())
 
     @rule(request=refunds)
     def retry_refund(self, request: Request) -> None:
@@ -479,11 +546,14 @@ class LedgerlineMachine(RuleBasedStateMachine):
     def change_faults(self, preset: str) -> None:
         self.set_faults(preset)
 
-    def set_faults(self, preset: str) -> None:
+    def set_faults(self, preset: str, seed: int | None = None) -> None:
         self.steps_since_faults = 0
         self.fault_preset = preset
         self.h.stats[f"faults {preset}"] += 1
-        self.h.run(self._faults(FAULT_PRESETS[preset]))
+        profile = dict(FAULT_PRESETS[preset])
+        if seed is not None:
+            profile["seed"] = seed
+        self.h.run(self._faults(profile))
 
     async def _faults(self, profile: dict[str, Any]) -> None:
         response = await self.sim.put("/admin/faults", json=profile)

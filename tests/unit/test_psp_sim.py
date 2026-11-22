@@ -172,3 +172,34 @@ def test_store_survives_restart(tmp_path: Any) -> None:
     )
     again = Store(path)
     assert again.charge_by_key("k") == charge
+
+
+async def test_an_injected_delay_loses_the_response_after_the_charge_is_recorded() -> (
+    None
+):
+    """The harness's deterministic "lost response": the delay raises, the
+    client sees a timeout, and the provider still has the charge."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.clients.psp import PspClient, PspUnavailable
+    from psp_sim.main import create_app
+
+    async def lost(seconds: float) -> None:
+        raise TimeoutError("lost")
+
+    app = create_app(db_path=":memory:", delay=lost)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://s"
+    ) as http:
+        await http.put("/admin/faults", json={"charge_then_timeout_rate": 1.0})
+        client = PspClient(http, timeout_seconds=30)
+        with pytest.raises(PspUnavailable):
+            await client.charge(
+                key="k", amount=100, currency="USD", merchant_reference="p"
+            )
+        await http.put("/admin/faults", json={})
+        replay = await client.charge(
+            key="k", amount=100, currency="USD", merchant_reference="p"
+        )
+    assert replay.succeeded
+    assert len(app.state.store.ground_truth()["charges"]) == 1
