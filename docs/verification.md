@@ -25,7 +25,8 @@ make verify-faults   # fault self-test + 8 fault scenarios against the full stac
 FAULT_SEEDS=1004 make verify-faults     # one plan again
 ```
 
-`verify-quick` and `verify` need Postgres and Redis, like `make test`.
+`verify-quick` and `verify` need Postgres and Redis, like `make test`; on a
+fresh clone, `make setup` provides both and writes `.env.test`.
 `verify-faults` needs only Docker: it builds and starts its own stack
 (next section). `make verify` writes the
 last history to `.verify/last.jsonl` (and the provider's ground truth next
@@ -240,6 +241,24 @@ pass can reach the line.
 Dated, newest first. Each entry: what failed, the minimal sequence, the fix,
 the regression test.
 
+### 2026-11-22 — Database outages answered 500, not 503 (found by the fault layer; fixed in Stage 8)
+
+- **Found by:** every fault run's summary listed `create_payment 500`,
+  `create_refund 500` and `create_transfer 500` (31 in one local run) while
+  Postgres was being reset or blackholed. The client treated them as unknown
+  and retried, so nothing was wrong afterwards, but the API was reporting an
+  outage as a server bug.
+- **Cause:** a lost or refused database connection escaped as an unhandled
+  exception: `ConnectionResetError` while connecting, or SQLAlchemy's
+  `DBAPIError` wrapping asyncpg's `ConnectionDoesNotExistError` mid-request.
+- **Fix:** an exception handler answers 503 with `Retry-After: 1` and "retry
+  with the same Idempotency-Key", only for connection failures
+  (`app.core.db_errors.is_dependency_failure`); a broken query, a constraint
+  or any other error is still a 500.
+- **Regression tests:** `test_routers.py::test_a_dependency_outage_is_503_with_retry_after`
+  and `test_a_query_error_is_still_a_500`; checked on the fault stack with a
+  Postgres reset.
+
 ### 2026-11-22 — Fault layer: crash windows crashed nothing (found by counting the crashes)
 
 - **Symptom**: every scenario with a crash point passed, and the summary's
@@ -267,8 +286,10 @@ the regression test.
 - **What it says about the system**: nothing wrong with correctness. But
   the PID 1 finding applies to every worker container in the dev and
   production setups: a stop or deploy always waits the full grace period
-  and ends in SIGKILL. Correct (the system is crash-safe by design) but slow; backlog
-  S7-7.
+  and ends in SIGKILL. Correct (the system is crash-safe by design) but slow.
+  **Fixed in Stage 8:** workers handle SIGTERM (`app/core/shutdown.py`),
+  finish the item in hand and leave; a stop takes 0.3–1.4 s, exit 0
+  (`tests/integration/test_shutdown.py`).
 
 ### 2026-11-22 — Fault layer: the self-test was masked by webhooks
 

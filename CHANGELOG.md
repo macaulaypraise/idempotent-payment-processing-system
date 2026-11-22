@@ -12,6 +12,51 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 8 — Release v2.0
+
+**Added**
+- `make setup`: a fresh clone to a passing `make verify-quick` in two
+  commands (env files, dependencies, Postgres and Redis, the test database).
+  Test targets read `.env.test` themselves.
+- `make demo` (`scripts/demo.py`): the project guide's demo, five steps,
+  each checked against the database and the provider's records (1,000
+  concurrent requests with one key, with and without Redis;
+  charge-then-timeout; webhooks redelivered and late copies out of order;
+  reconciliation with an injected mismatch).
+- `make bench` (`scripts/bench.py`): Locust headless plus outbox lag and
+  time to capture from the database, written with the machine's details.
+  Results in `docs/benchmarks.md`.
+- `make dlq`: dead-lettered payments, refunds and webhooks, from the database.
+- Runbooks: `docs/runbooks/redis-down.md`, `dlq-growing.md`,
+  `reconciliation-mismatch.md`.
+- `docs/writeups/01-testing-a-payment-system.md` (draft).
+- `tests/integration/test_shutdown.py`, `tests/unit/test_shutdown.py`.
+
+**Changed**
+- README rewritten for v2: four measured claims with reproducing commands,
+  what this is not, quick start, demo.
+- DESIGN.md rewritten as built (the v1 design is in git history), with the
+  measured results and limits filled in.
+- ADR 0004 accepted: Kafka kept; the demo is local-only.
+- Deploy.md marked v1-only.
+
+**Fixed**
+- A database outage is 503 with `Retry-After`, not 500 (found by the fault
+  layer). Only connection failures; other errors stay 500.
+- Workers handle SIGTERM: they finish the item in hand, the charger leaves
+  its Kafka group, the relay releases its lock. A stop took the full 10 s
+  grace period and ended in SIGKILL; it now takes 0.3–1.4 s (found by the
+  fault layer).
+- The API container sets `PSP_BASE_URL` itself, like the charger: with an
+  `.env` from before Stage 4, `POST /v1/reconciliations` could not reach the
+  provider (502). Found by `make demo`.
+
+**Measured, and stated**
+- Create latency p99 is 1,000–1,100 ms on the 2 vCPU bench machine: the
+  300 ms SLO is missed there. Outbox lag p99 478 ms meets its SLO.
+- Captures are capped at about 22/s by one sequential charger on a
+  one-partition topic (backlog S8-2).
+
 ### Stage 7 (part 2 of 2) — Verification harness: fault layer
 
 **Added**

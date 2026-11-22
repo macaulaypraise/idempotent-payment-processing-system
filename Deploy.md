@@ -1,4 +1,10 @@
-# Deployment Guide — Railway.app
+# Deployment Guide — Railway.app (v1 only)
+
+> **This guide is for v1** (tag `v1.0.0`). v2 is not deployed: it runs
+> locally with `make dev` (DESIGN.md §13). A v2 deployment needs managed
+> Kafka with three topics, a direct (non-pooled) Postgres connection for the
+> outbox relay's lock and LISTEN, the PSP simulator, and the six worker
+> processes; backlog S8-3.
 
 ## Prerequisites
 - GitHub repo pushed and CI passing

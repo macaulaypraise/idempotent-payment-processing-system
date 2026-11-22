@@ -129,7 +129,10 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 | S7-4 | Crash rules: arm a failpoint (`raise` mode) for one worker step, then continue. | verification | — |
 | S7-5 | I8 is only checked indirectly; check that every outbox row was handed to the queue exactly once per publish. | verification | — |
 | S7-6 | The fault layer settles once, after the run, so mid-run transfers are almost all refused. Reconciling mid-run needs care: with a zero settlement window, a capture between fetching the file and the missing-at-provider check would be reported falsely (a run for day D normally happens after D ends). | verification | — |
-| S7-7 | Every worker container (charger, sweeper, webhook processor, outbox relay, idempotency expiry) runs Python as PID 1 with no SIGTERM handler and no init: SIGTERM is ignored, so each stop or deploy waits the full grace period and ends in SIGKILL (found by the fault layer; uvicorn, for the API and simulator, handles SIGTERM itself). Add `init: true` (or tini in the Dockerfile) and graceful shutdown in the worker loops (finish the current item, leave the Kafka group, release the relay lock). | ops | 8 |
+| ~~S7-7~~ | ~~Worker containers ignore SIGTERM as PID 1.~~ Done in Stage 8: `app/core/shutdown.py`; stops take 0.3–1.4 s, exit 0. | ops | 8 |
+| S8-1 | Worker processes expose no metrics endpoint, so only the API is scraped: `dlq_depth`, `charger_attempts_total`, `webhooks_processed_total` and the relay's lag are never collected. Add `prometheus_client.start_http_server` to each worker and DNS-based scrape configs (the relay runs two replicas). Until then, `make dlq` reads the database. | observability | 9 |
+| S8-2 | Throughput: partition `payments.v1` by payment id and run a charger per partition; the single sequential charger caps captures at ~22/s on the bench machine (docs/benchmarks.md). | scale | — |
+| S8-3 | Hosted demo (DESIGN.md §13): managed Kafka, a direct Postgres connection for the relay, idle backoff for pollers on a scale-to-zero database. | ops | — |
 | S7-8 | Fault layer: no partitions between two services (Toxiproxy sits between a process and a dependency), no clock skew, no crash points in reconciliation. | verification | — |
 
 ## Parked ideas (not in any current stage)

@@ -1,7 +1,7 @@
 # 0004. Keep Kafka for domain events, with no broker abstraction layer
 
-- **Status:** Proposed
-- **Date:** 2026-11-21
+- **Status:** Accepted (implemented in Stages 0 and 5; hosting decided in Stage 8)
+- **Date:** 2026-11-21, updated 2026-11-22
 - **Stage:** 0 (local KRaft), 5 (topics and producer settings)
 
 ## Context
@@ -45,7 +45,15 @@ enough for every use. The question is whether Kafka earns its place.
 
 - Two queueing mechanisms with a clear rule for which is used where.
 - Hosting needs a managed Kafka that allows three topics, or the live demo is
-  local-only (decided at Stage 8).
+  local-only. **Decided at Stage 8: local-only.** The v1 Redpanda trial is
+  gone, and the one-command local stack is the deliverable.
+- `payments.v1` is auto-created with one partition and consumed by one
+  charger, one message at a time. `make bench` measures that as the
+  throughput limit (DESIGN.md section 11), before any hot row. Partitioning by
+  payment id keeps per-payment order and is the first scaling step.
+- The fault layer (Stage 7) runs real Kafka behind Toxiproxy, advertised
+  through the proxy; blackholes and resets on Kafka cost lag, never
+  correctness.
 - The Stage 7 in-process harness bypasses Kafka on purpose; Kafka behaviour is
   covered by the fault-injection layer.
 

@@ -1,145 +1,136 @@
-# Idempotent Payment Processing System
+# Ledgerline (IPPS v2)
 
-> Retrying the same payment request 1000 times produces one charge, one database row, one Kafka event. Every time.
+A Postgres-native money-movement core: an idempotent payments API, a
+double-entry ledger, replay-safe provider webhooks and daily reconciliation,
+built against a deliberately hostile payment-provider simulator. Its
+correctness claims, **no duplicate effect and books that always balance**,
+are checked by generated adversarial histories and fault injection on the
+full stack, every night, not by a load test.
 
----
+Each claim below links to the command that reproduces it. Every number was
+measured, and says where.
 
-## The Problem This Solves
-
-When a client sends a payment and the network drops before the response arrives — neither side knows if the charge went through. Retry and risk a double charge. Don't retry and risk a missed payment.
-
-This system makes retries safe by solving two problems most payment APIs ignore:
-
-1. **The duplicate request problem** — the same request arriving twice (or 1000 times) must produce exactly one payment
-2. **The dual-write problem** — writing to a database and publishing an event cannot be made atomic; a crash between the two creates silent data loss
-
----
-
-## How It Works
-
-```
-CLIENT  →  POST /payments  +  Idempotency-Key: <uuid>
-                │
-                ▼
-        ┌─ Redis cache check ──── HIT → return stored response (no DB touch)
-        ├─ Distributed lock ───── prevents concurrent duplicates
-        ├─ DB transaction ──────── Payment row + OutboxEvent row (atomic)
-        └─ Cache response, release lock → 202 Accepted
-
-OUTBOX POLLER  →  polls outbox_events WHERE published_at IS NULL  →  Kafka
-
-KAFKA  →  SETTLEMENT WORKER
-           ├─ PENDING → PROCESSING → SETTLED / FAILED
-           ├─ Exponential backoff, max 5 retries
-           └─ Dead Letter Queue on exhaustion
-```
-
----
-
-## Results
-
-### Correctness (what actually matters)
-
-| Scenario | Concurrent Users | Requests | Duplicate Charges |
+| | Claim | Measured | Reproduce |
 |---|---|---|---|
-| Normal load | 50 | 1,378 | **0** |
-| Stress test | 1,000 | 12,746 | **0** |
+| 1 | **0 duplicate charges, 0 ledger imbalance** across generated adversarial histories and fault-injected runs of the whole stack | 361 state-machine histories (9,460 steps checked, 1,140 provider charges) and 8 fault scenarios (3,462 requests, 41 network faults on Postgres, Redis, Kafka, the provider and the API, 17 process kills, crashes mid-charge): 0 violations. Developer laptop (WSL2), 2026-11-22; both re-run [every night](../../actions/workflows/nightly.yml) | `make verify`, `make verify-faults` |
+| 2 | **Redis is a cache, not the source of truth**: losing it creates no duplicates | 1,000 concurrent requests with one idempotency key, Redis stopped: 1 payment, 1 provider charge. Under load: 200 users for 90 s with Redis stopped for 31 s of it: 6,986 requests, 0 duplicate payments (9 requests failed at the client with connection errors; the 2 vCPU VM was overloaded, p50 5 s), 2026-11-22 | `make demo` (step 2), `make load-test-redis-kill`; [docs/benchmarks.md](docs/benchmarks.md) |
+| 3 | **The provider can lie and the books still reconcile**: charge-then-timeout, duplicate, late and out-of-order webhooks change nothing twice; every injected settlement discrepancy is flagged and none is posted | every harness history ends with reconciliation and 0 unexplained items; amount mismatch, missing, extra and duplicate lines each detected | `make demo` (steps 3–5), `pytest tests/integration/test_reconciliation.py tests/integration/test_webhooks.py` |
+| 4 | **Latency and lag, measured, with the hardware** | create p50 170 ms / p99 1,000 ms at 20 users; outbox lag p99 478 ms; about 22 captures/s end to end, bounded by one sequential charger (DESIGN.md §11). A 2 vCPU / 8 GB Linux VM running every service and the load generator, 2026-11-22: a baseline for changes, not a capacity figure | `make bench`; [docs/benchmarks.md](docs/benchmarks.md) |
 
-Duplicate charge rate held at **0%** under both loads — verified by asserting every retry with the same idempotency key returns the identical `payment_id`.
+The verification log, including the bugs it found (one in the system's
+retry ordering, two found by fault injection, six in the harness itself), is
+in [docs/verification.md](docs/verification.md).
 
-### Performance
+## What this is not
 
-| Scenario | Req/s | P50 | P95 | Error Rate |
-|---|---|---|---|---|
-| 50 users | 27 | 10ms | 35ms | 0% |
-| 1,000 users | 210 | 160ms | 13s | 0.4% |
+- **Not a payment service provider.** It never touches card data; payment
+  methods are opaque simulator tokens. No PCI scope.
+- **One provider, simulated** (`psp_sim/`). No routing; a real provider will
+  have behaviours the simulator lacks.
+- **Full refunds only, one currency per transfer**, no FX.
+- **Not hosted.** The local one-command stack is the deliverable; there is no
+  live demo URL (DESIGN.md §13).
+- **Verification is not proof.** It shows no violation in the histories
+  explored. It is not a linearizability check.
 
-At 1,000 users the 0.4% error rate is connection pool exhaustion on a single container — idempotency correctness is maintained throughout. In production: horizontal scaling + DB pool tuning.
+## Quick start
 
-### Test Coverage
-
-```
-91 tests passing  ·  83% coverage  ·  5.28s
-```
-
----
-
-## Engineering Decisions
-
-**Outbox pattern** instead of direct Kafka publish — writing to Kafka after the DB commit creates a crash window where the event is permanently lost. The Outbox writes the event inside the same DB transaction; the poller handles Kafka asynchronously. [→ DESIGN.md](DESIGN.md#outbox-pattern)
-
-**Redis SETNX distributed lock** — two concurrent requests with the same idempotency key both see a cache miss and both proceed without a lock. SETNX ensures only one continues; the TTL releases the lock automatically if the process crashes. [→ DESIGN.md](DESIGN.md#distributed-lock)
-
-**Optimistic locking** on the payments table — `SELECT FOR UPDATE` creates contention queues. A `version` column lets reads proceed freely; only the write detects conflicts and retries. Works because payment conflicts are rare in practice. [→ DESIGN.md](DESIGN.md#optimistic-locking)
-
-**Deterministic UUID5 event IDs** in the settlement worker — the outbox poller delivers at-least-once to Kafka. If the worker crashes after processing but before committing the offset, the message replays. UUID5 derived from `topic:partition:offset` makes the deduplication check a no-op on replay. [→ DESIGN.md](DESIGN.md#consumer-deduplication)
-
----
-
-## Quick Start
-
-> The `v2` branch is mid-rebuild ("Ledgerline"); see `CHANGELOG.md` for the
-> current stage. The full README is rewritten at v2.0.
+Needs Docker, Python 3.12+ and Poetry.
 
 ```bash
-git clone <your-repo-url> && cd idempotent-payment-processing-system
-
-cp .env.example .env
-make dev                     # starts the stack and applies migrations
-make tenant NAME=demo        # prints tenant_id and api_key (shown once)
-export IPPS_API_KEY=<api_key>
-# Payments land in a wallet:
-WALLET_ID=$(curl -s -X POST http://localhost:8000/v1/wallets \
-  -H "Authorization: Bearer $IPPS_API_KEY" -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" -d '{"currency": "USD"}' | jq -r .wallet_id)
+make setup          # env files, dependencies, Postgres + Redis, test database
+make verify-quick   # state machine (20 histories) + its self-test: ~1 minute
 ```
 
-API live at **http://localhost:8000/docs**
+That is a fresh clone to a passing verification run. Then:
 
 ```bash
-# Create a payment
-KEY=$(uuidgen)
-curl -X POST http://localhost:8000/v1/payments \
-  -H "Authorization: Bearer $IPPS_API_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: $KEY" \
-  -d '{"amount": 9999, "currency": "USD", "wallet_id": "'$WALLET_ID'"}'
-
-# Retry: identical response with "Idempotent-Replayed: true", no second payment
-curl -i -X POST http://localhost:8000/v1/payments \
-  -H "Authorization: Bearer $IPPS_API_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: $KEY" \
-  -d '{"amount": 9999, "currency": "USD", "wallet_id": "'$WALLET_ID'"}'
-
-# Same key, different body: 422. Missing key: 400. Key still in flight: 409.
-
-# Amounts are integer minor units (9999 = 99.99). Refund a captured payment:
-curl -X POST http://localhost:8000/v1/refunds \
-  -H "Authorization: Bearer $IPPS_API_KEY" -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" -d '{"payment_id": "<payment_id>"}'
+make dev            # the whole stack: API :8000, simulator :8001, Kafka, workers, Prometheus, Grafana
+make demo           # the three-minute demo below, every claim checked live
+make test           # 530+ tests, unit and integration
+make verify         # 300 random histories + self-test (~6 min)
+make verify-faults  # 8 fault scenarios on the full stack behind Toxiproxy + self-test (~10 min)
+make bench          # latency, outbox lag, time to capture, with the hardware
 ```
 
----
+## The demo
 
-## Testing & Observability
+`make demo` runs against `make dev` and checks each step against the
+database and the provider's own records, not the API's answers:
 
-```bash
-make test-unit        # 5 seconds, no Docker needed
-make test             # full suite + coverage report
-make load-test-ui     # Locust UI at http://localhost:8089
+1. 1,000 concurrent requests with one idempotency key: one payment.
+2. Redis stopped, the same again: still one payment.
+3. The provider charges, then never answers: the payment ends `CAPTURED`
+   with one charge, because every retry sends the same provider key.
+4. The provider's webhooks redelivered twice each, then late copies under new
+   event ids, the refund's before the charge's: no state change, no ledger
+   entry posted twice.
+5. Reconciliation with one injected amount mismatch: flagged and left
+   unsettled; every other line settled with its fee.
+
+## How it works
+
+```
+            ┌────────────── Idempotency-Key ──────────────┐
+ client ──► │ API: one Postgres transaction               │ ──► Redis (response cache only)
+            │ key row + payment + ledger + outbox row     │
+            └──────────────────────┬──────────────────────┘
+                                   │ Postgres (source of truth)
+          ┌────────────────────────┼─────────────────────────────┐
+          ▼                        ▼                             ▼
+   outbox relay x2          sweeper (retries,              webhook processor
+   (one leader, NOTIFY)     leases, lost events)           (inbox, SKIP LOCKED)
+          │                        │                             ▲
+          ▼ Kafka payments.v1      ▼                             │ signed webhooks
+       charger ──── provider key = payment / refund id ───► PSP simulator
+                                                                 │
+                         reconciliation (daily file) ◄───────────┘
 ```
 
-| Tool | URL |
+- **Idempotency is a database property.** The key row, the payment, its
+  ledger postings and its outbox event commit together. A retry replays the
+  stored response; a different body under the same key is 422; a key still
+  in flight is 409; a database outage is 503. All with `Retry-After` where a
+  retry helps.
+- **Every provider call uses a stable key** (the payment or refund id), so a
+  retry after a lost response gets the original charge back.
+- **One function applies every provider outcome** (`apply_psp_result`),
+  whether it came from the charger, a webhook, the sweeper or
+  reconciliation: it ignores what is already applied.
+- **The ledger is double-entry and immutable.** Transfers must balance (a
+  deferred trigger), entries cannot be updated or deleted (not even by the
+  owner), and cached totals are checked against entry sums.
+- **Reconciliation flags, never corrects.**
+
+| Endpoint | |
 |---|---|
-| API docs | http://localhost:8000/docs |
-| Prometheus | http://localhost:9090 |
-| Grafana | http://localhost:3000 |
+| `POST /v1/wallets`, `GET /v1/wallets/{id}/balance`, `GET /v1/wallets/{id}/entries` | wallets on the ledger |
+| `POST /v1/payments`, `GET /v1/payments/{id}` | pay-in (202, processed asynchronously) |
+| `POST /v1/refunds`, `GET /v1/refunds/{id}` | full refunds |
+| `POST /v1/transfers` | wallet to wallet |
+| `POST /v1/webhooks/psp` | signed provider webhooks |
+| `POST /v1/reconciliations`, `GET /v1/reconciliations/{id}` | platform keys only |
 
----
+Every write needs `Authorization: Bearer <key>` (`make tenant NAME=acme`)
+and an `Idempotency-Key`. OpenAPI at http://localhost:8000/docs.
 
-**Live demo:** https://serene-charisma-production.up.railway.app/docs
+## Read more
 
-## Stack
+- [DESIGN.md](DESIGN.md): invariants, data model, flows, failure modes,
+  measured limits.
+- [docs/adr/](docs/adr/): nine decisions, each ending with "what would change
+  my mind".
+- [docs/verification.md](docs/verification.md): what is checked, what is
+  not, results, and the bug log.
+- [docs/reconciliation.md](docs/reconciliation.md) and
+  [docs/runbooks/](docs/runbooks/): Redis down, dead letters growing,
+  reconciliation mismatch.
+- [docs/writeups/01-testing-a-payment-system.md](docs/writeups/01-testing-a-payment-system.md):
+  how the verification was built, and what it found.
+- [docs/benchmarks.md](docs/benchmarks.md): the measured runs behind the
+  numbers above, with their machines.
+- [CHANGELOG.md](CHANGELOG.md): stage by stage.
 
-Python 3.12 · FastAPI · PostgreSQL 15 · Redis 7 · Kafka · SQLAlchemy (async) · Alembic · Docker Compose · GitHub Actions CI
+Python 3.12 · FastAPI · PostgreSQL 16 · Redis 7 · Kafka 4.2 (KRaft) ·
+SQLAlchemy (async) · Alembic · Hypothesis · Toxiproxy · Locust · Prometheus ·
+GitHub Actions. v1, the original idempotent payments API, is tagged `v1.0.0`.
