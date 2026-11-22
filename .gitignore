@@ -51,3 +51,4 @@ tests/load/results/
 
 # verification harness output (histories of the last run)
 .verify/
+.verify-faults/

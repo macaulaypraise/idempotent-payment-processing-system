@@ -1,8 +1,11 @@
 name: Nightly verification
 
-# The long, randomized state-machine profile and the harness self-test.
-# A failure uploads the failing history; the summary records the numbers
-# the README quotes (docs/verification.md).
+# Two jobs, both part of the five-night exit gate (docs/verification.md):
+#   verify  the long, randomized state-machine profile and its self-test
+#   faults  the whole stack behind Toxiproxy: seeded scenarios of network
+#           faults, process kills and crash points, and the fault self-test
+# A failure uploads the failing history; the summaries record the numbers
+# the README quotes.
 on:
   schedule:
     - cron: "17 2 * * *" # 02:17 UTC
@@ -11,6 +14,9 @@ on:
       examples:
         description: "Histories to generate"
         default: "300"
+      fault_scenarios:
+        description: "Fault scenarios to run"
+        default: "8"
 
 jobs:
   verify:
@@ -86,3 +92,52 @@ jobs:
             .verify/
             verify.log
           retention-days: 14
+
+  faults:
+    name: Fault layer (Toxiproxy scenarios) + self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FAULT_SCENARIOS: ${{ github.event.inputs.fault_scenarios || '8' }}
+      FAULT_SECONDS: "40"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install poetry
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+      - run: poetry install --no-interaction
+      - name: Run the fault layer
+        run: |
+          set -o pipefail
+          make verify-faults 2>&1 | tee faults.log
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Fault layer"
+            echo '```'
+            grep -E '^faults:|^scenario|^fault self-test|^  ' faults.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Container logs
+        if: failure()
+        run: docker compose -f docker-compose.faults.yml logs --no-color --timestamps > faults-compose.log || true
+      - name: Upload the failing scenario
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: faults-${{ github.run_id }}
+          path: |
+            .verify-faults/
+            faults.log
+            faults-compose.log
+          retention-days: 14
+      - name: Remove the fault stack
+        if: always()
+        run: docker compose -f docker-compose.faults.yml down -v || true

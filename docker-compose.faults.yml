@@ -1,0 +1,214 @@
+# Fault-injection stack (Stage 7 part 2, docs/verification.md).
+#
+#   make verify-faults
+#
+# The whole system with Toxiproxy in front of every dependency:
+#
+#   client (host) ──► toxiproxy:18000 ──► api
+#   app + workers ──► toxiproxy:15432 ──► postgres
+#                 ──► toxiproxy:16379 ──► redis
+#                 ──► toxiproxy:19092 ──► kafka   (advertised as toxiproxy:19092)
+#                 ──► toxiproxy:18001 ──► psp-sim
+#   psp-sim webhooks ──► toxiproxy:18000 ──► api
+#
+# A separate project (ipps-faults) with its own containers, tmpfs data and
+# host ports, so it never touches the dev stack or its volumes: every
+# scenario truncates the database. Settings are shortened (retries, leases,
+# sweeper interval) so a scenario quiesces in seconds, not minutes.
+#
+# The runner reaches postgres, redis and the simulator directly (not through
+# Toxiproxy) for resets, ground truth and checks: the control plane is never
+# faulted, only the paths the system itself uses.
+name: ipps-faults
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: runtime
+  image: ${IPPS_FAULTS_IMAGE:-ipps-faults-app}
+  restart: unless-stopped
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    toxiproxy:
+      condition: service_started
+  environment: &app-env
+    APP_ENV: test # failpoints and planted bugs work; never "production"
+    LOG_LEVEL: INFO
+    DATABASE_URL: postgresql+asyncpg://ipps_app:ipps_app_faults@toxiproxy:15432/payments_faults
+    REDIS_URL: redis://toxiproxy:16379/0
+    KAFKA_BOOTSTRAP_SERVERS: toxiproxy:19092
+    PSP_BASE_URL: http://toxiproxy:18001
+    PSP_WEBHOOK_SECRET: whsec_faults
+    PSP_TIMEOUT_SECONDS: "2"
+    PSP_LEASE_SECONDS: "10"
+    PSP_MAX_ATTEMPTS: "6"
+    PSP_RETRY_BASE_SECONDS: "0.5"
+    PSP_RETRY_MAX_SECONDS: "8"
+    SWEEPER_INTERVAL_SECONDS: "1"
+    SWEEPER_PENDING_AFTER_SECONDS: "5"
+    WEBHOOK_POLL_SECONDS: "0.25"
+    WEBHOOK_RETRY_BASE_SECONDS: "0.5"
+    WEBHOOK_RETRY_MAX_SECONDS: "5"
+    OUTBOX_FALLBACK_POLL_SECONDS: "1"
+    RECON_SETTLEMENT_WINDOW_DAYS: "0"
+    FAILPOINTS: ""
+    HARNESS_PLANTED_BUGS: ""
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: payments_faults
+    ports: ["${FAULTS_PG_PORT:-55432}:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d payments_faults"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports: ["${FAULTS_REDIS_PORT:-56379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Clients must only ever learn the proxy's address: the PROXIED listener
+  # advertises toxiproxy:19092, so metadata never sends them around the
+  # proxy. INTERNAL is for the healthcheck only.
+  kafka:
+    image: apache/kafka:4.2.1
+    environment:
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PROXIED://:19092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PROXIED://toxiproxy:19092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PROXIED:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    mem_limit: 1024m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./verification/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "${FAULTS_TOXIPROXY_PORT:-58474}:8474"
+      - "${FAULTS_API_PORT:-58000}:18000" # the client's way in, through the proxy
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: ${IPPS_FAULTS_IMAGE:-ipps-faults-app}
+    command: >-
+      sh -c ".venv/bin/alembic upgrade head &&
+             .venv/bin/python -m app.cli configure-app-role"
+    restart: "no"
+    environment:
+      APP_ENV: test
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments_faults
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments_faults
+      APP_DB_ROLE: ipps_app
+      APP_DB_PASSWORD: ipps_app_faults
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+
+  psp-sim:
+    <<: *app
+    command: .venv/bin/uvicorn psp_sim.main:app --host 0.0.0.0 --port 8001
+    depends_on:
+      toxiproxy:
+        condition: service_started
+    ports: ["${FAULTS_SIM_PORT:-58001}:8001"] # control plane: ground truth, resets
+    environment:
+      PSP_SIM_DB_PATH: /data/psp_sim.db
+      PSP_SIM_RESPONSE_TIMEOUT_SECONDS: "4" # "slow" outlives the 2 s client timeout
+      PSP_SIM_WEBHOOK_URL: http://toxiproxy:18000/v1/webhooks/psp
+      PSP_SIM_WEBHOOK_SECRET: whsec_faults
+    # A volume, not tmpfs: the provider's record must survive a SIGKILL and
+    # restart, as a real provider's would (tmpfs is wiped when the container
+    # stops, and the checker rightly reported every charge as never made)
+    volumes: [psp-sim-data:/data]
+
+  outbox_poller:
+    <<: *app
+    command: .venv/bin/python -m app.workers.outbox_poller
+    deploy:
+      replicas: 2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+
+  charger:
+    <<: *app
+    command: .venv/bin/python -m app.workers.charger
+    environment:
+      <<: *app-env
+      FAILPOINTS: ${CHARGER_FAILPOINTS:-}
+      HARNESS_PLANTED_BUGS: ${PLANTED_BUGS:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+
+  sweeper:
+    <<: *app
+    command: .venv/bin/python -m app.workers.sweeper
+    environment:
+      <<: *app-env
+      FAILPOINTS: ${SWEEPER_FAILPOINTS:-}
+      HARNESS_PLANTED_BUGS: ${PLANTED_BUGS:-}
+
+  webhook_processor:
+    <<: *app
+    command: .venv/bin/python -m app.workers.webhook_processor
+    environment:
+      <<: *app-env
+      FAILPOINTS: ${WEBHOOK_PROCESSOR_FAILPOINTS:-}
+
+volumes:
+  psp-sim-data:

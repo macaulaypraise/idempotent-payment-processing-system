@@ -38,7 +38,14 @@ def pay(
 
 @pytest.mark.parametrize(
     ("status", "outcome"),
-    [(200, "ok"), (202, "ok"), (422, "fail"), (503, "unknown"), (None, "unknown")],
+    [
+        (200, "ok"),
+        (202, "ok"),
+        (422, "fail"),
+        (409, "unknown"),  # same key still in flight: no decided answer yet
+        (503, "unknown"),
+        (None, "unknown"),
+    ],
 )
 def test_outcomes(status: int | None, outcome: str) -> None:
     assert outcome_for(status) == outcome

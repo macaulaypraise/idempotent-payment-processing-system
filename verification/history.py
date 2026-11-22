@@ -3,7 +3,10 @@
 Every request a client makes is recorded with its outcome:
   ok       2xx: the system acknowledged it
   fail     4xx: a deterministic rejection (stored under the key, replayable)
-  unknown  5xx, timeout or connection error: it may or may not have happened
+  unknown  5xx, 409, timeout or connection error: it may or may not have
+           happened. A 409 means another request with the same key is still
+           in flight: the answer is not decided yet, so it is retried, not
+           compared (I9 compares only decided answers).
 
 The checker rebuilds the client's view of the world (verification.model)
 from this file alone, so the in-process state machine and the fault-layer
@@ -27,6 +30,10 @@ class Operation:
     status: int | None  # HTTP status; None when there was no response
     body: Any  # the response body (JSON) or an error description
     outcome: str  # ok | fail | unknown
+    # Seconds since the run started, when real time matters (the fault
+    # layer: line requests up with faults). None in the state machine,
+    # whose histories are about order, not time.
+    at: float | None = None
 
     @property
     def acknowledged(self) -> bool:
@@ -34,7 +41,7 @@ class Operation:
 
 
 def outcome_for(status: int | None) -> str:
-    if status is None or status >= 500:
+    if status is None or status >= 500 or status == 409:
         return "unknown"
     return "ok" if status < 400 else "fail"
 
@@ -53,6 +60,7 @@ class History:
         status: int | None = None,
         body: Any = None,
         outcome: str | None = None,
+        at: float | None = None,
     ) -> Operation:
         operation = Operation(
             seq=len(self.operations),
@@ -63,6 +71,7 @@ class History:
             status=status,
             body=body,
             outcome=outcome or outcome_for(status),
+            at=at,
         )
         self.operations.append(operation)
         return operation

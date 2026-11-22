@@ -1,0 +1,7 @@
+[
+  {"name": "api", "listen": "0.0.0.0:18000", "upstream": "api:8000", "enabled": true},
+  {"name": "postgres", "listen": "0.0.0.0:15432", "upstream": "postgres:5432", "enabled": true},
+  {"name": "redis", "listen": "0.0.0.0:16379", "upstream": "redis:6379", "enabled": true},
+  {"name": "kafka", "listen": "0.0.0.0:19092", "upstream": "kafka:19092", "enabled": true},
+  {"name": "psp", "listen": "0.0.0.0:18001", "upstream": "psp-sim:8001", "enabled": true}
+]

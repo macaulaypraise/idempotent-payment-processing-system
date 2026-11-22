@@ -7,7 +7,7 @@
 .PHONY: help dev down logs logs-app logs-worker shell test test-unit \
         test-integration test-cov migrate migrate-down migrate-status \
         check-infra load-test load-test-ui lint lint-fix typecheck fmt \
-        clean clean-cache verify verify-quick verify-faults bench recon demo \
+        clean clean-cache verify verify-quick verify-faults verify-faults-down bench recon demo \
         tenant api-key load-test-redis-kill
 
 # Default target — print available commands
@@ -159,8 +159,23 @@ verify: ## State machine, nightly profile (300 random histories) + self-test; hi
 	VERIFY_PROFILE=nightly VERIFY_HISTORY_DIR=.verify LOG_LEVEL=ERROR \
 		poetry run pytest tests/verification -s --no-cov
 
-verify-faults: ## [Stage 7 part 2] Toxiproxy fault-injection scenarios
-	@echo "make verify-faults: arrives with Stage 7 part 2"; exit 1
+# The fault layer runs the whole system in its own compose project
+# (ipps-faults: own containers, ports and tmpfs database; the dev stack and
+# its data are untouched). On success the stack is removed; on a violation it
+# is left running for inspection (make verify-faults-down removes it).
+# FAULT_SCENARIOS, FAULT_SECONDS and FAULT_SEEDS=7,12 override the run.
+FAULTS_COMPOSE = docker compose -f docker-compose.faults.yml
+FAULTS_ENV = APP_ENV=test LOG_LEVEL=ERROR \
+	DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/payments_faults \
+	REDIS_URL=redis://localhost:56379/0 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+
+verify-faults: ## Fault layer: seeded scenarios against the full stack behind Toxiproxy + self-test (~10 min)
+	$(FAULTS_COMPOSE) up -d --build
+	$(FAULTS_ENV) poetry run python -m verification.faults --selftest \
+		&& $(FAULTS_COMPOSE) down -v
+
+verify-faults-down: ## Remove the fault stack and its data
+	$(FAULTS_COMPOSE) down -v
 
 bench: ## [Stage 8] Headless Locust benchmark with CSV output
 	@echo "make bench: not implemented yet (Stage 8)"; exit 1
