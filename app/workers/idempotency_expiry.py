@@ -14,6 +14,7 @@ from app.core.clock import Clock, SystemClock
 from app.core.database import AsyncSessionFactory
 from app.core.logging import setup_logging
 from app.core.metrics import idempotency_keys_expired_total
+from app.core.shutdown import sleep_or_stop, stop_on_signals
 from app.services.idempotency import delete_expired_keys
 
 logger = structlog.get_logger()
@@ -41,15 +42,17 @@ async def main() -> None:  # pragma: no cover - loop around run_once
     setup_logging()
     settings = get_settings()
     clock = SystemClock()
+    stop = stop_on_signals("idempotency_expiry")
     logger.info("idempotency_expiry_started")
-    while True:
+    while not stop.is_set():
         try:
             await run_once(
                 AsyncSessionFactory, clock, settings.IDEMPOTENCY_EXPIRY_BATCH_SIZE
             )
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
             logger.error("idempotency_expiry_failed", error=str(exc))
-        await asyncio.sleep(settings.IDEMPOTENCY_EXPIRY_INTERVAL_SECONDS)
+        await sleep_or_stop(settings.IDEMPOTENCY_EXPIRY_INTERVAL_SECONDS, stop)
+    logger.info("idempotency_expiry_stopped")
 
 
 if __name__ == "__main__":  # pragma: no cover

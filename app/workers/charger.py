@@ -434,33 +434,41 @@ async def main() -> None:  # pragma: no cover - Kafka loop around handle()
     from app.core.database import AsyncSessionFactory
     from app.core.kafka_client import close_kafka_consumer, create_kafka_consumer
     from app.core.logging import setup_logging
+    from app.core.shutdown import stop_on_signals
 
     setup_logging()
     settings = get_settings()
     psp = build_psp_client(settings.PSP_BASE_URL, settings.PSP_TIMEOUT_SECONDS)
     charger = Charger(AsyncSessionFactory, psp, SystemClock(), settings)
     consumer = await create_kafka_consumer(TOPICS, CONSUMER_GROUP, auto_commit=False)
+    stop = stop_on_signals("charger")
     logger.info("charger_started", topics=TOPICS)
     try:
-        async for message in consumer:
-            try:
-                event = decode(
-                    message.topic, message.value, list(message.headers or [])
-                )
-                await charger.handle(event)
-            except Exception as exc:  # noqa: BLE001
-                # The row is either unclaimed (the sweeper picks up PENDING
-                # rows whose event was lost) or leased (the sweeper retries it),
-                # so committing the offset cannot lose a payment.
-                logger.error(
-                    "charger_event_failed",
-                    topic=message.topic,
-                    offset=message.offset,
-                    error=str(exc),
-                )
-            await consumer.commit()
+        # One message at a time, checking for a stop between messages: a stop
+        # finishes the charge in hand, commits its offset, and leaves the
+        # group (close), so the partition moves to another member at once.
+        while not stop.is_set():
+            batches = await consumer.getmany(timeout_ms=1000, max_records=1)
+            for message in (m for records in batches.values() for m in records):
+                try:
+                    event = decode(
+                        message.topic, message.value, list(message.headers or [])
+                    )
+                    await charger.handle(event)
+                except Exception as exc:  # noqa: BLE001
+                    # The row is either unclaimed (the sweeper picks up PENDING
+                    # rows whose event was lost) or leased (the sweeper retries
+                    # it), so committing the offset cannot lose a payment.
+                    logger.error(
+                        "charger_event_failed",
+                        topic=message.topic,
+                        offset=message.offset,
+                        error=str(exc),
+                    )
+                await consumer.commit()
     finally:
         await close_kafka_consumer(consumer)
+        logger.info("charger_stopped")
 
 
 if __name__ == "__main__":  # pragma: no cover

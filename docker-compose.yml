@@ -149,6 +149,9 @@ services:
     environment:
       # Must match the simulator's PSP_SIM_WEBHOOK_SECRET below
       PSP_WEBHOOK_SECRET: ${PSP_WEBHOOK_SECRET:-local-dev-webhook-secret}
+      # POST /v1/reconciliations fetches the settlement file. Set here like the
+      # charger's, so an .env from before Stage 4 cannot point it at localhost.
+      PSP_BASE_URL: http://psp-sim:8001
     ports:
       - "8000:8000"
     depends_on:

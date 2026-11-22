@@ -143,6 +143,68 @@ async def test_conflict_returns_409_with_retry_after(client: AsyncClient) -> Non
     assert resp.headers["Retry-After"] == "1"
 
 
+class _ConnectionDoesNotExistError(Exception):
+    """Named like asyncpg's, which is what SQLAlchemy wraps on a lost link."""
+
+
+_ConnectionDoesNotExistError.__name__ = "ConnectionDoesNotExistError"
+
+
+def _lost_connection() -> Exception:
+    from sqlalchemy.exc import DBAPIError
+
+    return DBAPIError("INSERT ...", {}, _ConnectionDoesNotExistError("closed"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionResetError("reset by peer"),
+        ConnectionRefusedError("refused"),
+        TimeoutError("timed out"),
+        "lost_connection",
+    ],
+    ids=["reset", "refused", "timeout", "dbapi-lost-connection"],
+)
+async def test_a_dependency_outage_is_503_with_retry_after(
+    client: AsyncClient, error: Any
+) -> None:
+    """Seen under fault injection as 500s; the outcome is unknown, so the
+    client must retry with the same key: 503 says exactly that."""
+    exc = _lost_connection() if error == "lost_connection" else error
+    with patch(
+        "app.routers.idempotent.execute_idempotent", new=AsyncMock(side_effect=exc)
+    ):
+        resp = await _post(client)
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "1"
+    assert "same Idempotency-Key" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_query_error_is_still_a_500(app: Any) -> None:
+    """Only connection failures are 503; a broken query is a bug and stays 500."""
+    from sqlalchemy.exc import IntegrityError, ProgrammingError
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as raw:
+        for exc in (
+            ProgrammingError("SELECT", {}, Exception("syntax error")),
+            IntegrityError("INSERT", {}, Exception("duplicate key")),
+            ValueError("bug"),
+            FileNotFoundError("not a network failure"),
+        ):
+            with patch(
+                "app.routers.idempotent.execute_idempotent",
+                new=AsyncMock(side_effect=exc),
+            ):
+                resp = await _post(raw)
+            assert resp.status_code == 500, exc
+
+
 @pytest.mark.asyncio
 async def test_mismatch_returns_422(client: AsyncClient) -> None:
     with patch(

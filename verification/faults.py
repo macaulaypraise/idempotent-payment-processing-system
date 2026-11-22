@@ -116,12 +116,10 @@ async def recreate(*services: str, env: dict[str, str] | None = None) -> None:
     """Replace containers so a new environment (a failpoint, a planted bug)
     takes effect. Compose reads ${SERVICE}_FAILPOINTS and ${PLANTED_BUGS}.
 
-    The old container is killed at once (--timeout 0). A graceful stop
-    takes Docker's full 10 s grace period: a worker is PID 1 in its
-    container with no SIGTERM handler, and the kernel ignores signals to
-    PID 1 that it has no handler for (backlog S7-7).
-    With the wait, a crash window was over before its containers were up,
-    and crashed nothing."""
+    The old container is killed at once (--timeout 0): replacing it is a
+    crash, which is what this layer injects. (Before the workers handled
+    SIGTERM, a graceful stop also waited Docker's whole 10 s grace period,
+    and crash windows were over before their containers were up.)"""
     code, output = await compose(
         "up",
         "-d",

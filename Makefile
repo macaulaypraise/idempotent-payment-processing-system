@@ -4,10 +4,10 @@
 # Usage: make <target>
 # =============================================================================
 
-.PHONY: help dev down logs logs-app logs-worker shell test test-unit \
+.PHONY: help setup dev down logs logs-app logs-worker shell test test-unit \
         test-integration test-cov migrate migrate-down migrate-status \
         check-infra load-test load-test-ui lint lint-fix typecheck fmt \
-        clean clean-cache verify verify-quick verify-faults verify-faults-down bench recon demo \
+        clean clean-cache verify verify-quick verify-faults verify-faults-down bench recon demo dlq \
         tenant api-key load-test-redis-kill
 
 # Default target — print available commands
@@ -22,6 +22,25 @@ help:
 # -----------------------------------------------------------------------------
 # Local development
 # -----------------------------------------------------------------------------
+
+# Host-side test settings: .env.test when it exists (make setup writes it).
+# CI sets the same variables in the workflow and has no .env.test.
+TEST_ENV = $(if $(wildcard .env.test),set -a; . ./.env.test; set +a;,)
+PG_USER = $(or $(shell sed -n 's/^POSTGRES_USER=//p' .env 2>/dev/null),postgres)
+
+setup: ## Fresh clone -> ready: env files, dependencies, Postgres + Redis, test database (then: make verify-quick)
+	@command -v docker >/dev/null || (echo "setup needs Docker"; exit 1)
+	@command -v poetry >/dev/null || (echo "setup needs Poetry (pipx install poetry)"; exit 1)
+	@test -f .env || (cp .env.example .env && echo "created .env from .env.example")
+	@test -f .env.test || (cp .env.test.example .env.test && echo "created .env.test from .env.test.example")
+	poetry install --no-interaction
+	docker compose up -d --wait postgres redis
+	@docker compose exec -T postgres psql -U $(PG_USER) -tAc \
+		"SELECT 1 FROM pg_database WHERE datname = 'payments_test'" | grep -q 1 \
+		|| docker compose exec -T postgres createdb -U $(PG_USER) payments_test
+	@echo ""
+	@echo "  Ready. Next: make verify-quick   (or make test, make dev, make demo)"
+	@echo ""
 
 dev: ## Start full local stack (app + Redis + Postgres + Kafka + Prometheus + Grafana)
 	docker compose up -d --build
@@ -81,15 +100,15 @@ check-infra: ## Verify all infrastructure services are healthy
 # Testing
 # -----------------------------------------------------------------------------
 
-test: ## Run full suite (unit + integration) as CI does; needs Postgres + Redis (see .env.test.example)
-	poetry run pytest tests/ -v --tb=short \
+test: ## Run full suite (unit + integration) as CI does; needs Postgres + Redis (make setup)
+	$(TEST_ENV) poetry run pytest tests/ -v --tb=short \
 		--cov=app --cov-report=term-missing --cov-fail-under=80
 
 test-unit: ## Run unit tests only — fast, no Docker services needed
 	poetry run pytest tests/unit -v --tb=short
 
 test-integration: ## Run integration tests against running Docker stack
-	poetry run pytest tests/integration -v --tb=short
+	$(TEST_ENV) poetry run pytest tests/integration -v --tb=short
 
 test-cov: ## Run tests with HTML coverage report (opens in browser)
 	poetry run pytest tests/unit tests/integration \
@@ -149,14 +168,14 @@ api-key: ## Add an API key to a tenant: make api-key TENANT=<uuid|default>
 
 # -----------------------------------------------------------------------------
 # Verification harness (docs/verification.md). Needs Postgres + Redis, like
-# `make test`. VERIFY_EXAMPLES overrides the number of histories.
+# `make test` (make setup). VERIFY_EXAMPLES overrides the number of histories.
 # -----------------------------------------------------------------------------
 
 verify-quick: ## State machine, short derandomized profile (~20 histories) + self-test, as PR CI
-	VERIFY_PROFILE=pr LOG_LEVEL=ERROR poetry run pytest tests/verification -s --no-cov -p no:cacheprovider
+	$(TEST_ENV) VERIFY_PROFILE=pr LOG_LEVEL=ERROR poetry run pytest tests/verification -s --no-cov -p no:cacheprovider
 
 verify: ## State machine, nightly profile (300 random histories) + self-test; histories in .verify/
-	VERIFY_PROFILE=nightly VERIFY_HISTORY_DIR=.verify LOG_LEVEL=ERROR \
+	$(TEST_ENV) VERIFY_PROFILE=nightly VERIFY_HISTORY_DIR=.verify LOG_LEVEL=ERROR \
 		poetry run pytest tests/verification -s --no-cov
 
 # The fault layer runs the whole system in its own compose project
@@ -177,14 +196,29 @@ verify-faults: ## Fault layer: seeded scenarios against the full stack behind To
 verify-faults-down: ## Remove the fault stack and its data
 	$(FAULTS_COMPOSE) down -v
 
-bench: ## [Stage 8] Headless Locust benchmark with CSV output
-	@echo "make bench: not implemented yet (Stage 8)"; exit 1
+# Scripts that drive the running dev stack from the host. They reach Postgres
+# with the owner credentials in .env; the variables below only satisfy the
+# app's settings on import.
+SCRIPT_ENV = APP_ENV=development LOG_LEVEL=WARNING \
+	DATABASE_URL=postgresql+asyncpg://unused@localhost/unused \
+	REDIS_URL=redis://localhost:6379/0 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+
+bench: ## Latency + outbox lag + time to capture on the dev stack, with the hardware (make dev first; BENCH_USERS, BENCH_SECONDS)
+	$(SCRIPT_ENV) poetry run python -m scripts.bench
+
+dlq: ## Dead letters: payments/refunds given up on, dead webhooks, dlq.v1 events (docs/runbooks/dlq-growing.md)
+	@docker compose exec -T postgres psql -U $(PG_USER) -d $(or $(shell sed -n 's/^POSTGRES_DB=//p' .env 2>/dev/null),payments_db) -c \
+		"SELECT 'payments PROCESSING, retries exhausted' AS dead_letters, count(*) FROM payments WHERE status = 'PROCESSING' AND next_attempt_at IS NULL AND wallet_id IS NOT NULL \
+		 UNION ALL SELECT 'refunds PROCESSING, retries exhausted', count(*) FROM refunds WHERE status = 'PROCESSING' AND next_attempt_at IS NULL \
+		 UNION ALL SELECT 'webhook events dead', count(*) FROM webhook_events WHERE status = 'dead' \
+		 UNION ALL SELECT 'dlq.v1 events, last 24 h', count(*) FROM outbox_events WHERE event_type = 'dlq.v1' AND created_at > now() - interval '24 hours'" \
+		-c "SELECT provider_event_id, event_type, attempts, left(last_error, 100) AS last_error FROM webhook_events WHERE status = 'dead' ORDER BY received_at DESC LIMIT 5"
 
 recon: ## Reconcile a provider file date (UTC): make recon [DATE=YYYY-MM-DD], default today
 	docker compose exec api .venv/bin/python -m app.workers.recon_job --date "$(or $(DATE),$(shell date -u +%F))"
 
-demo: ## [Stage 8] Scripted three-minute demo
-	@echo "make demo: not implemented yet (Stage 8)"; exit 1
+demo: ## The three-minute demo, every claim checked (make dev first; DEMO_PAUSE=2 for recording)
+	$(SCRIPT_ENV) poetry run python -m scripts.demo
 
 # -----------------------------------------------------------------------------
 # Cleanup

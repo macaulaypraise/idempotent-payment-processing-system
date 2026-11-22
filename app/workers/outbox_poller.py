@@ -168,6 +168,7 @@ async def main() -> None:  # pragma: no cover - wiring around OutboxRelay.run
     from app.core.database import AsyncSessionFactory
     from app.core.kafka_client import close_kafka_producer, create_kafka_producer
     from app.core.logging import setup_logging
+    from app.core.shutdown import stop_on_signals
 
     setup_logging()
     settings = get_settings()
@@ -179,11 +180,13 @@ async def main() -> None:  # pragma: no cover - wiring around OutboxRelay.run
         settings,
         name=f"{socket.gethostname()}:{os.getpid()}",
     )
+    stop = stop_on_signals("outbox_relay")
     logger.info("outbox_relay_starting", relay=relay.name)
     try:
-        await relay.run()
+        await relay.run(stop)  # closing its connection releases the leader lock
     finally:
         await close_kafka_producer(producer)
+        logger.info("outbox_relay_stopped", relay=relay.name)
 
 
 if __name__ == "__main__":  # pragma: no cover

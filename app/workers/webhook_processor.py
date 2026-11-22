@@ -291,19 +291,22 @@ def _uuid(value: Any, name: str) -> uuid.UUID:
 async def main() -> None:  # pragma: no cover - loop around run_once()
     from app.core.database import AsyncSessionFactory
     from app.core.logging import setup_logging
+    from app.core.shutdown import sleep_or_stop, stop_on_signals
 
     setup_logging()
     settings = get_settings()
     processor = WebhookProcessor(AsyncSessionFactory, SystemClock(), settings)
+    stop = stop_on_signals("webhook_processor")
     logger.info("webhook_processor_started")
-    while True:
+    while not stop.is_set():
         try:
             outcomes = await processor.run_once()
         except Exception as exc:  # noqa: BLE001 - keep processing
             logger.error("webhook_processor_failed", error=str(exc))
             outcomes = []
         if len(outcomes) < settings.WEBHOOK_BATCH_SIZE:
-            await asyncio.sleep(settings.WEBHOOK_POLL_SECONDS)
+            await sleep_or_stop(settings.WEBHOOK_POLL_SECONDS, stop)
+    logger.info("webhook_processor_stopped")
 
 
 if __name__ == "__main__":  # pragma: no cover

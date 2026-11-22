@@ -1,11 +1,14 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.responses import Response
+import structlog
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from sqlalchemy.exc import DBAPIError
 
 from app.config import get_settings
+from app.core.db_errors import is_dependency_failure
 from app.core.logging import setup_logging
 from app.core.redis_client import close_redis_client, create_redis_client
 from app.routers import (
@@ -37,6 +40,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="IPPS / Ledgerline", version="2.0.0-dev", lifespan=lifespan)
+
+logger = structlog.get_logger()
+RETRY_AFTER_SECONDS = 1
+
+
+async def dependency_unavailable(request: Request, exc: Exception) -> Response:
+    """A database (or other dependency) outage is a 503 with Retry-After,
+    not a 500: nothing is wrong with the request, and its outcome is unknown,
+    so the client should retry it with the same idempotency key. Anything
+    else is re-raised and stays a 500."""
+    if not is_dependency_failure(exc):
+        raise exc
+    logger.warning(
+        "dependency_unavailable",
+        path=request.url.path,
+        error=f"{type(exc).__name__}: {exc}"[:300],
+    )
+    return JSONResponse(
+        {"detail": "a dependency is unavailable; retry with the same Idempotency-Key"},
+        status_code=503,
+        headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+    )
+
+
+for _error in (OSError, TimeoutError, DBAPIError):
+    app.add_exception_handler(_error, dependency_unavailable)
 
 app.include_router(payments.router, tags=["payments"])
 app.include_router(wallets.router, tags=["wallets"])

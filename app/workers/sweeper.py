@@ -149,6 +149,7 @@ class Sweeper:
 async def main() -> None:  # pragma: no cover - loop around run_once()
     from app.core.database import AsyncSessionFactory
     from app.core.logging import setup_logging
+    from app.core.shutdown import sleep_or_stop, stop_on_signals
 
     setup_logging()
     settings = get_settings()
@@ -156,15 +157,17 @@ async def main() -> None:  # pragma: no cover - loop around run_once()
     psp = build_psp_client(settings.PSP_BASE_URL, settings.PSP_TIMEOUT_SECONDS)
     charger = Charger(AsyncSessionFactory, psp, clock, settings)
     sweeper = Sweeper(AsyncSessionFactory, charger, clock, settings)
+    stop = stop_on_signals("sweeper")
     logger.info("sweeper_started")
-    while True:
+    while not stop.is_set():
         try:
             results = await sweeper.run_once()
         except Exception as exc:  # noqa: BLE001 - keep sweeping
             logger.error("sweeper_failed", error=str(exc))
             results = []
         if len(results) < settings.SWEEPER_BATCH_SIZE:
-            await asyncio.sleep(settings.SWEEPER_INTERVAL_SECONDS)
+            await sleep_or_stop(settings.SWEEPER_INTERVAL_SECONDS, stop)
+    logger.info("sweeper_stopped")
 
 
 if __name__ == "__main__":  # pragma: no cover
