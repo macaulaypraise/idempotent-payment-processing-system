@@ -132,6 +132,37 @@ down in 188 of the histories. The README quotes the nightly job's summary
 Dated, newest first. Each entry: what failed, the minimal sequence, the fix,
 the regression test.
 
+### 2026-11-22 — Sweeper attempted claims in heap order, not due order (found by the nightly job)
+
+- **Found by:** the first nightly run on GitHub, after the replayability fix
+  below: `FlakyStrategyDefinition` again, after 196 clean histories. Not
+  seen on the developer's WSL2 run (352 histories) or in the sandbox.
+- **Cause, in the product:** the sweeper claimed rows with
+  `UPDATE … WHERE id IN (SELECT … ORDER BY due LIMIT n) RETURNING …`.
+  Postgres does not return `RETURNING` rows in the subquery's order but in
+  physical heap order, which moves with HOT updates and vacuum timing. The
+  sweeper then attempted the claims in that order: "oldest first" was not
+  true, and in the harness (one claim at a time) the simulator's ordered
+  fault draws met payments in a timing-dependent order.
+- **Reproduced:** replaying GitHub's exact derandomized histories (`CI=true`)
+  in the sandbox, the pushed code failed after 15 histories; with the fix,
+  the same histories ran 367 clean.
+- **Fix:** the claim is a CTE that locks the due rows oldest first, updates
+  them, and returns them `ORDER BY due_at, created_at, id`; the same for
+  refunds.
+- **Regression test:**
+  `test_charger.py::test_sweeper_hands_back_claims_oldest_due_first` lays
+  the heap out in creation order with due order reversed; it fails 3 of 3 on
+  the old query and passes on the new one.
+- **Also found:** Hypothesis loads a derandomized, database-less `ci` profile
+  whenever `CI` is set, and the nightly profile inherited it. Every night
+  would have replayed the same 300 histories and discarded saved failures,
+  making "five green nights" one run five times over. Profiles now name
+  Hypothesis's `default` profile as parent; nightly is explicitly random
+  with an example database
+  (`test_harness.py::test_profiles_ignore_hypothesis_ci_profile`).
+- This is the first bug in the system itself that the harness found.
+
 ### 2026-11-22 — Harness: histories were not replayable (FlakyStrategyDefinition)
 
 - **Found by:** the developer's local `make verify` on WSL2, after 384
@@ -207,7 +238,10 @@ the regression test.
 
 ### Bugs in the system found by the harness
 
-None so far: no history has violated an invariant in the system itself.
+One: the sweeper attempted claims in heap order, not due order (2026-11-22,
+above). It broke no money invariant (every order is safe), but "oldest
+first" was false and made outcomes depend on vacuum timing. No history has
+violated an invariant in the system itself.
 Before the harness, the stage tests found one real bug (Stage 3: a payment
 without a wallet would have been charged, failed to record and been charged
 again on retry; fixed by skipping legacy payments before the provider call).

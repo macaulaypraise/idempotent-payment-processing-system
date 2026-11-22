@@ -11,7 +11,7 @@ import asyncio
 import random
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -400,3 +400,54 @@ async def test_processed_events_written_only_with_the_effect(
             .where(ProcessedEvent.event_id == event.event_id)
         )
         assert count.scalar_one() == 0
+
+
+async def test_sweeper_hands_back_claims_oldest_due_first(
+    session_factory: Any, make_tenant: Any
+) -> None:
+    """Claims come back in due order even when the heap holds the rows in
+    another order. (UPDATE ... RETURNING returns heap order; the sweeper used
+    to attempt claims in that order, so which payment met which provider
+    fault depended on vacuum timing.)"""
+    from types import SimpleNamespace
+
+    from sqlalchemy import text
+
+    from app.config import get_settings
+    from app.core.clock import FakeClock
+    from app.services.payment_service import create_payment
+    from app.workers.sweeper import Sweeper
+
+    creds = await make_tenant()
+    ids = []
+    async with session_factory() as db:
+        for n in range(6):
+            result = await create_payment(
+                db,
+                tenant_id=creds.tenant_id,
+                idempotency_key=f"order-{n}",
+                amount=100 + n,
+                currency="USD",
+                wallet_id=creds.wallet_id,
+            )
+            ids.append(result.resource_id)
+        await db.commit()
+    clock = FakeClock(datetime.now(UTC))
+    # Rewrite the rows oldest first, so the newest tuple versions sit in
+    # creation order, while the due order is the reverse of creation order
+    async with session_factory() as db:
+        for n, payment_id in enumerate(ids):
+            await db.execute(
+                text(
+                    "UPDATE payments SET status = 'PROCESSING', "
+                    "next_attempt_at = :due WHERE id = :id"
+                ),
+                {"due": clock.now() - timedelta(seconds=n), "id": payment_id},
+            )
+        await db.commit()
+
+    charger = SimpleNamespace(lease_until=lambda: clock.now() + timedelta(seconds=30))
+    sweeper = Sweeper(session_factory, charger, clock, get_settings())  # type: ignore[arg-type]
+    claims = await sweeper.claim_due()
+
+    assert [c.id for c in claims] == list(reversed(ids))

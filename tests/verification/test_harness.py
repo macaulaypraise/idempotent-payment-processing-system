@@ -64,3 +64,12 @@ def test_the_machine_is_deterministic(harness: machine.Harness) -> None:
     run_state_machine_as_test(machine.LedgerlineMachine, settings=profile)
     assert dict(harness.stats) == first
     assert first["provider charges"] > 0  # the runs did real work
+
+
+def test_profiles_ignore_hypothesis_ci_profile() -> None:
+    """Nightly must stay random with its example database even on CI, where
+    Hypothesis auto-loads a derandomized, database-less "ci" profile."""
+    nightly = settings.get_profile("nightly")
+    assert nightly.derandomize is False
+    assert nightly.database is not None
+    assert settings.get_profile("pr").derandomize is True

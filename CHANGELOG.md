@@ -59,6 +59,14 @@ timeout: `psp_sim.create_app(delay=…)` lets the harness raise `TimeoutError`
 exactly where the response goes missing. New rule: refund a payment that is
 refundable now. New test: `test_the_machine_is_deterministic`.
 
+**Fixed after the first nightly run on GitHub (2026-11-22):** the sweeper
+attempted claims in physical heap order (`UPDATE … RETURNING` does not keep
+the subquery's `ORDER BY`), so "oldest first" was false and outcomes
+depended on vacuum timing; the claim is now a CTE returning rows
+`ORDER BY due_at, created_at, id` (regression test included). Hypothesis's
+auto-loaded `ci` profile made the nightly run derandomized and
+database-less on GitHub; profiles now have an explicit parent.
+
 ### Stage 6 — Reconciliation
 
 **Added**

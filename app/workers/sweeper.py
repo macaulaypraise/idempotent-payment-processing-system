@@ -27,41 +27,60 @@ from app.workers.charger import Charger, Claim, Result
 
 logger = structlog.get_logger()
 
+# Claim due rows oldest first and hand them back in that order. A plain
+# UPDATE ... WHERE id IN (SELECT ... ORDER BY ...) RETURNING returns rows in
+# physical heap order, not the subquery's order, and heap order moves with
+# HOT updates and vacuum timing. The claims are then attempted in whatever
+# order came back, so the order must be explicit: due time, then creation
+# time (unique, and the same on every replay of a history), then id.
 _CLAIM_PAYMENTS = text(
     """
-    UPDATE payments
-    SET status = 'PROCESSING', attempts = attempts + 1, next_attempt_at = :lease_until
-    WHERE id IN (
-        SELECT id FROM payments
+    WITH due AS (
+        SELECT id, coalesce(next_attempt_at, created_at) AS due_at, created_at
+        FROM payments
         WHERE wallet_id IS NOT NULL
           AND ((status = 'PROCESSING' AND next_attempt_at IS NOT NULL
                 AND next_attempt_at <= :now)
                OR (status = 'PENDING' AND created_at <= :pending_cutoff))
-        ORDER BY coalesce(next_attempt_at, created_at)
+        ORDER BY coalesce(next_attempt_at, created_at), created_at, id
         LIMIT :limit
         FOR UPDATE SKIP LOCKED
+    ), claimed AS (
+        UPDATE payments p
+        SET status = 'PROCESSING', attempts = p.attempts + 1,
+            next_attempt_at = :lease_until
+        FROM due
+        WHERE p.id = due.id
+        RETURNING p.id, p.tenant_id, p.attempts, p.amount, p.currency,
+                  due.due_at, due.created_at AS first_seen
     )
-    RETURNING id, tenant_id, attempts, amount, currency
+    SELECT id, tenant_id, attempts, amount, currency FROM claimed
+    ORDER BY due_at, first_seen, id
     """
 )
 
 _CLAIM_REFUNDS = text(
     """
-    UPDATE refunds r
-    SET status = 'PROCESSING', attempts = r.attempts + 1,
-        next_attempt_at = :lease_until, updated_at = :now
-    FROM payments p
-    WHERE p.id = r.payment_id
-      AND r.id IN (
-        SELECT id FROM refunds
+    WITH due AS (
+        SELECT id, coalesce(next_attempt_at, created_at) AS due_at, created_at
+        FROM refunds
         WHERE (status = 'PROCESSING' AND next_attempt_at IS NOT NULL
                AND next_attempt_at <= :now)
            OR (status = 'PENDING' AND created_at <= :pending_cutoff)
-        ORDER BY coalesce(next_attempt_at, created_at)
+        ORDER BY coalesce(next_attempt_at, created_at), created_at, id
         LIMIT :limit
         FOR UPDATE SKIP LOCKED
-      )
-    RETURNING r.id, r.tenant_id, r.attempts, r.amount, r.currency, p.psp_reference
+    ), claimed AS (
+        UPDATE refunds r
+        SET status = 'PROCESSING', attempts = r.attempts + 1,
+            next_attempt_at = :lease_until, updated_at = :now
+        FROM due, payments p
+        WHERE r.id = due.id AND p.id = r.payment_id
+        RETURNING r.id, r.tenant_id, r.attempts, r.amount, r.currency,
+                  p.psp_reference, due.due_at, due.created_at AS first_seen
+    )
+    SELECT id, tenant_id, attempts, amount, currency, psp_reference FROM claimed
+    ORDER BY due_at, first_seen, id
     """
 )
 

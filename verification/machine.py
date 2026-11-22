@@ -38,6 +38,7 @@ import structlog
 from httpx import ASGITransport, AsyncClient
 from hypothesis import HealthCheck, Phase, settings
 from hypothesis import strategies as st
+from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis.stateful import (
     Bundle,
     RuleBasedStateMachine,
@@ -54,32 +55,48 @@ from verification.history import History
 
 T = TypeVar("T")
 
+# Every profile names its parent. Hypothesis loads its own "ci" profile
+# (derandomize=True, database=None) whenever the CI variable is set, and a
+# profile registered without a parent inherits whatever is loaded: on GitHub
+# the nightly run became derandomized, so every night would have replayed the
+# same 300 histories and thrown away the saved failures.
+_BASE = settings.get_profile("default")
+_HEALTH = [HealthCheck.too_slow, HealthCheck.data_too_large]
+
 settings.register_profile(
     "pr",
+    parent=_BASE,
     max_examples=int(os.environ.get("VERIFY_EXAMPLES", "20")),
     stateful_step_count=30,
     derandomize=True,
+    database=None,
     deadline=None,
-    suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
+    suppress_health_check=_HEALTH,
 )
 settings.register_profile(
     "nightly",
+    parent=_BASE,
     max_examples=int(os.environ.get("VERIFY_EXAMPLES", "300")),
     stateful_step_count=50,
+    derandomize=False,  # new histories every night
+    database=DirectoryBasedExampleDatabase(
+        ".hypothesis/examples"
+    ),  # replay failures first
     deadline=None,
     print_blob=True,
-    suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
+    suppress_health_check=_HEALTH,
 )
 # The self-test only needs to find the planted bug, not shrink it
 settings.register_profile(
     "selftest",
+    parent=_BASE,
     max_examples=int(os.environ.get("VERIFY_SELFTEST_EXAMPLES", "150")),
     stateful_step_count=25,
     derandomize=True,
     deadline=None,
     database=None,
     phases=[Phase.explicit, Phase.generate],
-    suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
+    suppress_health_check=_HEALTH,
 )
 
 WEBHOOK_SECRET = "whsec_harness"
@@ -151,10 +168,12 @@ HARNESS: Harness | None = None
 
 def configure(owner_url: str, app_url: str, redis_url: str | None = None) -> Harness:
     global HARNESS
-    # Thousands of steps log every charge and retry; keep only errors so the
-    # harness's own summary is readable (restored by shutdown()).
+    # Thousands of steps log every charge, retry and (under injected faults,
+    # expected) dead letter; keep only critical logs so the harness's own
+    # summary is readable. Violations surface as assertions, not logs.
+    # Restored by shutdown().
     structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(logging.ERROR)
+        wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL)
     )
     HARNESS = Harness(owner_url, app_url, redis_url)
     return HARNESS
