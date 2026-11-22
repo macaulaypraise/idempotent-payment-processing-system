@@ -12,6 +12,46 @@ v2 rebuilds IPPS as a money-movement core: Postgres-backed idempotency, a
 double-entry ledger, a hostile PSP simulator, reconciliation, and a
 verification harness. Each build stage is tagged `v2-stage-N`.
 
+### Stage 7 (part 2 of 2) — Verification harness: fault layer
+
+**Added**
+- `docker-compose.faults.yml`: the whole system (API, simulator, two outbox
+  relays, charger, sweeper, webhook processor) with Toxiproxy in front of
+  Postgres, Redis, Kafka (advertised through the proxy), the simulator and
+  the API. Its own compose project, ports and tmpfs database; shortened
+  retry, lease and sweeper settings.
+- `verification/scenario.py`: a seed expands into a 40 s plan of latency,
+  reset and blackhole faults (either direction), SIGKILLs with restarts,
+  and crash points armed through `FAILPOINTS=…=exit`, over a provider fault
+  profile.
+- `verification/faults.py`: the runner. Concurrent clients (payments,
+  double submits, refunds, transfers, mismatched-body reuse) retrying every
+  unknown outcome with the same key; safety sampled every 3 s while faults
+  are live; then heal, answer every unknown request, wait for quiet,
+  reconcile and run `checker.check_all`. Availability (answered within 90 s
+  of healing) and liveness (quiet within 180 s) are checked too. A failing
+  scenario leaves its history, ground truth, plan and logs in
+  `.verify-faults/<seed>/` and the stack running.
+- Fault self-test: charger and sweeper restarted with the planted
+  fresh-key bug, responses delayed past the timeout, webhooks dropped; the
+  runner must report I3. Runs before every fault run.
+- `make verify-faults` / `make verify-faults-down`; a `faults` job in the
+  nightly workflow with its own summary and artifacts.
+- History lines carry `at` (seconds since the run started) when time
+  matters.
+- `tests/unit/test_fault_scenarios.py`.
+
+**Changed**
+- A 409 (same key still in flight) is an unknown outcome in histories, not
+  a decided rejection: it is retried, never compared by I9.
+
+**Found** (docs/verification.md, bug log)
+- Worker containers run Python as PID 1 with no SIGTERM handler: every
+  stop waits the full grace period, then SIGKILL (backlog S7-7).
+- Three harness bugs, fixed: the provider's store on tmpfs forgot charges
+  when killed; webhooks masked the fault self-test; crash windows crashed
+  nothing.
+
 ### Stage 7 (part 1 of 2) — Verification harness: model and state machine
 
 **Added**

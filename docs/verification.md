@@ -4,8 +4,16 @@
 something stronger: **these invariants held across N generated adversarial
 histories**, and it proves it can tell, by catching a bug planted on purpose.
 
-Code: `verification/` (library), `tests/verification/` (entry points).
-Decision record: ADR 0009.
+Two layers, one checker:
+
+1. **The state machine**: generated histories, in-process, sequential and
+   exactly replayable.
+2. **The fault layer**: the whole system in containers behind Toxiproxy,
+   with seeded network faults, process kills and crash points. Real
+   concurrency, real Kafka, real time; reproducible plans, not histories.
+
+Code: `verification/` (library), `tests/verification/` (entry points),
+`docker-compose.faults.yml`. Decision record: ADR 0009.
 
 ## Running it
 
@@ -13,9 +21,13 @@ Decision record: ADR 0009.
 make verify-quick    # ~20 derandomized histories + self-test (~30 s); runs in every CI build
 make verify          # 300 random histories + self-test (~6 min); the nightly job
 VERIFY_EXAMPLES=1000 make verify
+make verify-faults   # fault self-test + 8 fault scenarios against the full stack (~10 min); nightly
+FAULT_SEEDS=1004 make verify-faults     # one plan again
 ```
 
-Both need Postgres and Redis, like `make test`. `make verify` writes the
+`verify-quick` and `verify` need Postgres and Redis, like `make test`.
+`verify-faults` needs only Docker: it builds and starts its own stack
+(next section). `make verify` writes the
 last history to `.verify/last.jsonl` (and the provider's ground truth next
 to it). A failing run prints the minimal failing sequence of steps;
 Hypothesis keeps it in `.hypothesis/` and replays it first next time.
@@ -73,9 +85,15 @@ That last line ties three independent sources together: the ledger, the
 provider's records and the client's acknowledged transfers. A double
 release, a lost capture or a transfer applied twice all break it.
 
-The same checker runs offline on a recorded history
-(`python -m verification.checker --history … --ground-truth …`); Stage 7
-part 2's fault-layer scenarios use it that way.
+The fault layer calls the same `check_all` on its recorded histories. A
+failing scenario can be re-checked offline against the database it left
+behind:
+
+```bash
+python -m verification.checker --history .verify-faults/<seed>/history.jsonl \
+  --ground-truth .verify-faults/<seed>/ground-truth.json \
+  --database-url postgresql+asyncpg://postgres:postgres@localhost:55432/payments_faults
+```
 
 ## Does it catch bugs? (the self-test)
 
@@ -94,10 +112,82 @@ harness run, edit reverted):
 | Release on settlement while a refund holds the money | yes, nightly profile only | the wallet guard (I6) refused the double release |
 | Webhook processor marks a not-yet-applicable event processed instead of parking it | **no** | nothing is wrong afterwards: the sweeper and reconciliation heal what the webhook would have. Defence in depth makes this bug invisible to invariants; it is covered by the Stage 5 tests instead |
 
+## The fault layer
+
+`make verify-faults` starts `docker-compose.faults.yml`: every process in
+its own container (API, simulator, two outbox relays, charger, sweeper,
+webhook processor) and Toxiproxy in front of every dependency.
+
+```
+client (runner) ──► toxiproxy ──► api ◄── toxiproxy ◄── psp-sim webhooks
+app + workers   ──► toxiproxy ──► postgres | redis | kafka | psp-sim
+```
+
+Kafka advertises the proxy's address, or clients would go around it after
+the first metadata call. The stack is its own compose project
+(`ipps-faults`: own containers, ports, tmpfs database), so it cannot touch
+the dev stack or its data; every scenario truncates its database. Retries,
+leases and the sweeper interval are shortened so a scenario quiesces in
+seconds. The runner reaches Postgres, Redis and the simulator directly for
+resets, ground truth and checks: the control plane is never faulted.
+
+**A scenario** (`verification/scenario.py`) is a seed that expands into a
+40-second plan:
+
+| Fault | How | Targets |
+|---|---|---|
+| latency | Toxiproxy `latency`, 0.3–3 s | any of api, postgres, redis, kafka, psp |
+| reset | Toxiproxy `reset_peer`, request or response direction | same |
+| blackhole | Toxiproxy `timeout` 0: bytes vanish, connections stay open | same |
+| crash | `docker kill -s KILL`, restarted 1–5 s later | api, charger, sweeper, webhook processor, either relay, simulator |
+| crash at a line | containers recreated with `FAILPOINTS=<name>=exit`: they die there on every pass, and restart, until disarmed; the summary counts the crashes | `charger.after_claim` and `charger.after_provider_call` (armed in charger and sweeper together: both run that code), `webhook_processor.before_commit` |
+
+Three to six network faults, one to three kills and, half the time, a
+crash point, over a provider profile drawn from the state machine's presets
+(lost responses, declines, slow, webhook chaos, or none). The response
+direction matters: a lost *response* to a write is exactly the case
+idempotency exists for.
+
+**The run** (`verification/faults.py`): two to four client tasks pay,
+double-submit (the same request twice at once), refund, transfer and reuse
+a key with a different body, while the timeline applies the plan. Every
+request goes in the history with its time. A timeout, connection error,
+5xx or 409 (same key still in flight) is *unknown* and is retried with the
+same key and body, as a correct client would. Then every fault is removed,
+every unknown request is retried until answered, the runner waits until no
+work is left, reconciles every provider date, and checks.
+
+**What it checks**: the same `checker.check_all` as the state machine (I1–I7,
+I9, I10, the model, no unexplained reconciliation item), plus
+
+- safety (I1 I2 I3 I5 I6, I9) **sampled every 3 s while faults are live**;
+- **availability**: every request answered within 90 s of the faults
+  being removed;
+- **liveness**: no work left (outbox, `PENDING` or leased payments and
+  refunds, unprocessed webhooks on either side) within 180 s.
+
+On a violation the runner stops and leaves the stack running: history,
+ground truth, plan and container logs go to `.verify-faults/<seed>/`, and the
+database stays as the checker saw it (`make verify-faults-down` removes it).
+
+**Its self-test** runs first: charger and sweeper restarted with the planted
+bug (a fresh provider key per retry), every provider response delayed past
+the charger's timeout and every webhook lost. The runner must report I3.
+Losing the webhooks is necessary: they heal a lost response within
+milliseconds, before any retry, which hides the bug (see the bug log).
+
+**Reproducibility, honestly**: a seed fixes the plan (which faults, when,
+which provider profile, how many clients), not the history. Real processes
+and real time decide the interleaving, so a re-run of a failing seed applies
+the same faults at the same seconds and may or may not hit the same race.
+That is the trade: the state machine replays exactly but cannot see races;
+this layer sees races but cannot replay them.
+
 ## Results
 
 | Run | Histories | Steps checked | Provider charges | Violations |
 |---|---|---|---|---|
+| Nightly profile, developer's WSL2 with `CI=true`, 2026-11-22 (sweeper fix) | 361 | 9,460 | 1,140 (296 refunds) | 0 |
 | Nightly profile, sandbox under CPU load, 2026-11-22 (deterministic machine) | 367 | 8,874 | 1,023 (287 refunds) | 0 |
 | Nightly profile, developer's WSL2, 2026-11-22 (before the fix) | 384 | 8,808 | 1,050 | 0, then not replayable (see bug log) |
 | Nightly profile, sandbox, 2026-11-21 | 400 | 9,026 | 1,614 (132 refunds) | 0 |
@@ -108,17 +198,35 @@ End states in that nightly run: 986 `SETTLED`, 130 `REFUNDED`, 498
 down in 188 of the histories. The README quotes the nightly job's summary
 (GitHub Actions → Nightly verification), not these numbers.
 
+**Fault layer** (`make verify-faults`, 40 s scenarios):
+
+| Run | Scenarios | Requests (unknown, retried) | Faults applied | Provider charges | Violations |
+|---|---|---|---|---|---|
+| Sandbox (2 CPUs), 2026-11-22, seeds 3000–3007 | 8 + self-test | 3,453 (140) | 36 network (13 blackhole, 10 latency, 9 reset, on all five proxies), 18 kills, 7 crashes at a failpoint | 1,591 for 1,591 payments (1,398 settled, 193 refunded) | 0 |
+
+The self-test reported the planted double charge (I3) before every run.
+A scenario takes about 50–65 s, quiet 4–17 s after its faults are removed.
+Crash points crash 0–2 times per armed window: each crash costs a
+container restart (Python start-up, a Kafka group rejoin) before the next
+pass can reach the line.
+
 ## What is not checked (yet, or here)
 
-- **Concurrency.** The machine is sequential, and its workers process one
-  item at a time (so that every history replays exactly). Races
-  (two requests with one key at once, processor against charger, two relay
-  replicas) are covered by the integration tests of Stages 1, 3 and 5.
-- **Kafka, real networks, process crashes.** Stage 7 part 2 adds Toxiproxy
-  (latency, reset, blackhole) and process kills, checked by the same
-  checker on recorded histories.
-- **Crashes inside a step.** Failpoints are tested per stage (charger,
-  webhook processor, reconciliation), not generated by the machine.
+- **Concurrency in the state machine.** The machine is sequential, and its
+  workers process one item at a time (so that every history replays
+  exactly). The fault layer runs the real concurrent system (concurrent
+  sweeps, four webhook lanes, two relays, double submits), but cannot
+  replay an interleaving it found.
+- **Partitions between two services only.** Toxiproxy sits between each
+  process and a dependency; it cannot split the network (for example, the
+  relays from each other while both still reach Postgres). Clock skew is
+  not injected.
+- **Crash points in reconciliation.** `recon.after_line` is covered by the
+  Stage 6 tests; the fault layer reconciles only after healing.
+- **Transfers in the fault layer** are almost all refused (422): money
+  becomes available only at settlement, and the fault layer settles once,
+  after the run. They still check that a stored rejection replays; the
+  state machine covers transfers that move money.
 - **Settlement-file faults.** Covered by the Stage 6 tests; the machine
   asserts reconciliation finds nothing to explain.
 - **Transfers are rare**: money must be settled before it can move, so only
@@ -131,6 +239,60 @@ down in 188 of the histories. The README quotes the nightly job's summary
 
 Dated, newest first. Each entry: what failed, the minimal sequence, the fix,
 the regression test.
+
+### 2026-11-22 — Fault layer: crash windows crashed nothing (found by counting the crashes)
+
+- **Symptom**: every scenario with a crash point passed, and the summary's
+  new crash counter (Docker's restart count for the armed containers) read
+  0 across all of them. A manual test (arm, pay, wait 12 s) crashed the
+  charger at once.
+- **Causes, two**:
+  1. Arming means replacing the container, and a graceful stop waits
+     Docker's whole 10 s grace period (measured: 11.4 s, against 1.3 s
+     with an immediate kill): the worker is PID 1 in its container, has no
+     SIGTERM handler (`SigCgt` shows SIGINT only; uvicorn, for the API,
+     catches SIGTERM), and the kernel ignores signals to PID 1 that it has
+     no handler for. The window
+     (2–10 s) was over before the armed containers were up.
+  2. Armed in the charger alone, a charger crash point rarely met work: a
+     replaced charger rejoins its Kafka group for seconds, and the sweeper
+     claims the PENDING payment first, through the same code, unarmed.
+- **Fix**: containers are replaced with `--timeout 0` (a kill: replacing
+  an armed container is a crash anyway); a crash point is armed in every
+  service whose code reaches it (charger and sweeper together); windows
+  last 8–15 s. The summary reports crashes per scenario, so a window that
+  crashes nothing is visible.
+- **Regression tests**: `test_a_crash_point_is_armed_in_every_service_that_reaches_it`;
+  the crash counter in every run's summary.
+- **What it says about the system**: nothing wrong with correctness. But
+  the PID 1 finding applies to every worker container in the dev and
+  production setups: a stop or deploy always waits the full grace period
+  and ends in SIGKILL. Correct (the system is crash-safe by design) but slow; backlog
+  S7-7.
+
+### 2026-11-22 — Fault layer: the self-test was masked by webhooks
+
+- **Symptom**: the fault self-test (planted fresh-key bug, every provider
+  response delayed past the charger's timeout) passed clean: no double
+  charge.
+- **Cause**: the provider's webhook reports the charge within milliseconds,
+  and the webhook processor captures the payment long before the sweeper's
+  first retry. With no retry there is nothing for the planted bug to break.
+  The system's defence in depth hid the bug, the same effect as the planted
+  webhook bug in the state machine's table.
+- **Fix**: the self-test also drops every webhook (`webhooks_lost`), so only
+  retries can learn a charge's outcome; it then reports I3 at once.
+- **Regression test**: `test_the_self_test_loses_every_provider_response`;
+  the self-test itself runs before every fault run.
+
+### 2026-11-22 — Fault layer: the provider forgot its charges when killed (harness configuration)
+
+- **Symptom**: the first scenario that killed the simulator failed with
+  dozens of "payment is CAPTURED but the provider says no charge" and I7.
+- **Cause**: the simulator's store was on tmpfs, which is wiped when a
+  container stops. Killing the provider erased its ground truth. A real
+  provider never forgets a charge; the checker was right to object.
+- **Fix**: a named volume for the store (removed by `make verify-faults-down`).
 
 ### 2026-11-22 — Sweeper attempted claims in heap order, not due order (found by the nightly job)
 

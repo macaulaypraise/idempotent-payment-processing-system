@@ -123,11 +123,14 @@ against the running stack on 2026-11-21 (KRaft Kafka, mock provider, workers).
 
 | # | Item | Where | Stage |
 |---|---|---|---|
-| S7-1 | Toxiproxy fault layer (latency, reset, blackhole) + process kills, scenario runner writing JSONL, checked by `verification.checker`. | verification | 7 part 2 |
+| ~~S7-1~~ | ~~Toxiproxy fault layer (latency, reset, blackhole) + process kills, scenario runner writing JSONL, checked by `verification.checker`.~~ Done in Stage 7 part 2 (`make verify-faults`). | verification | 7 part 2 |
 | S7-2 | The state machine is sequential; add a rule that runs two client requests or two worker steps concurrently (`asyncio.gather`). | verification | — |
 | S7-3 | Transfers are rarely acknowledged in histories (money must be settled first); a rule that reconciles before transferring would exercise them more. | verification | — |
 | S7-4 | Crash rules: arm a failpoint (`raise` mode) for one worker step, then continue. | verification | — |
 | S7-5 | I8 is only checked indirectly; check that every outbox row was handed to the queue exactly once per publish. | verification | — |
+| S7-6 | The fault layer settles once, after the run, so mid-run transfers are almost all refused. Reconciling mid-run needs care: with a zero settlement window, a capture between fetching the file and the missing-at-provider check would be reported falsely (a run for day D normally happens after D ends). | verification | — |
+| S7-7 | Every worker container (charger, sweeper, webhook processor, outbox relay, idempotency expiry) runs Python as PID 1 with no SIGTERM handler and no init: SIGTERM is ignored, so each stop or deploy waits the full grace period and ends in SIGKILL (found by the fault layer; uvicorn, for the API and simulator, handles SIGTERM itself). Add `init: true` (or tini in the Dockerfile) and graceful shutdown in the worker loops (finish the current item, leave the Kafka group, release the relay lock). | ops | 8 |
+| S7-8 | Fault layer: no partitions between two services (Toxiproxy sits between a process and a dependency), no clock skew, no crash points in reconciliation. | verification | — |
 
 ## Parked ideas (not in any current stage)
 

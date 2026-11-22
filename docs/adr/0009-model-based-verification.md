@@ -58,6 +58,16 @@ proof that the harness can find a bug at all.
   item at a time, and lost responses are injected, not timed. Learned the
   hard way (docs/verification.md, 2026-11-22).
 - PR CI gains ~40 s; the nightly run takes ~6–11 minutes on a laptop.
+- **Part 2, the fault layer**, runs the containerised system behind
+  Toxiproxy with seeded plans (network faults, kills, crash points) and the
+  same checker. It trades the machine's exact replay for real concurrency,
+  Kafka and time: a seed reproduces the plan, not the interleaving. It runs
+  in its own compose project so it can truncate its database freely. Its
+  own self-test had to drop the provider's webhooks, which otherwise heal
+  every lost response before the planted bug can act; and its crash windows
+  crashed nothing until replaced containers were killed instead of stopped
+  (the workers ignore SIGTERM as PID 1). Both are in the bug log; the
+  crash count is now in every summary so it cannot silently go to zero.
 
 ## What would change my mind
 
