@@ -39,9 +39,14 @@ def _wait_for(process: subprocess.Popen[str], text: str, seconds: float) -> str:
 
 
 @pytest.mark.parametrize("worker", WORKERS)
-def test_a_worker_stops_cleanly_on_sigterm(worker: str) -> None:
+def test_a_worker_stops_cleanly_on_sigterm(worker: str, migrated_database: str) -> None:
     env = {
         **os.environ,
+        # The suite's migrated test database as the app role, like every other
+        # integration test; not whatever DATABASE_URL the shell holds (an old
+        # .env.test pointing at the compose hostname made every round block
+        # on a connection, and the stop waited behind it)
+        "DATABASE_URL": migrated_database,
         "PSP_BASE_URL": "http://127.0.0.1:9",  # never called: nothing to charge
         "LOG_LEVEL": "INFO",
         "SWEEPER_INTERVAL_SECONDS": "30",  # asleep when the signal lands

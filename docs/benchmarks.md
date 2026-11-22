@@ -23,7 +23,20 @@ Python 3.12. 2026-11-22.
 
 No failed requests; no two payments shared a key in either run.
 
-**Reading it:**
+**Machine:** developer laptop, WSL2 on Windows, 3 CPUs allotted (AMD Ryzen 5
+PRO 5650U), 3.8 GiB allotted, Docker 29.8, the full dev stack including
+Prometheus, Grafana and Kafka UI. 2026-11-22.
+
+| Load | POST /v1/payments p50 / p95 / p99 | Creates/s | Outbox lag p50 / p99 | Time to capture p50 / p99 | Captures/s |
+|---|---|---|---|---|---|
+| 50 users, 60 s | 950 / 1,500 / 1,800 ms | 27.0 | 92 / 281 ms | 59 / 77 s | 11.7 |
+
+No failed requests (1,550), no shared keys; every payment captured 81 s after
+the load stopped. The laptop is slower than the VM here (3.8 GiB for every
+service plus monitoring), and shows the same shape: creates outrun the single
+charger more than two to one.
+
+**Reading both:**
 - The create-latency SLO (p99 < 300 ms, DESIGN.md §9) is missed on this
   machine. Two vCPUs run Postgres, Kafka, Redis, the API (one uvicorn
   worker), six worker processes and Locust.

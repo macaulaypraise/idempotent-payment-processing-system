@@ -35,7 +35,7 @@ setup: ## Fresh clone -> ready: env files, dependencies, Postgres + Redis, test 
 	@test -f .env.test || (cp .env.test.example .env.test && echo "created .env.test from .env.test.example")
 	poetry install --no-interaction
 	docker compose up -d --wait postgres redis
-	@docker compose exec -T postgres psql -U $(PG_USER) -tAc \
+	@docker compose exec -T postgres psql -U $(PG_USER) -d postgres -tAc \
 		"SELECT 1 FROM pg_database WHERE datname = 'payments_test'" | grep -q 1 \
 		|| docker compose exec -T postgres createdb -U $(PG_USER) payments_test
 	@echo ""

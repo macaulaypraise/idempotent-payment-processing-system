@@ -239,8 +239,8 @@ reconciliation (`prometheus/alerts.yml`). Runbooks: `docs/runbooks/`.
 
 | SLO (target) | Measured (`make bench`, see section 11) |
 |---|---|
-| Payment-create latency p99 < 300 ms | **missed on the bench machine**: p99 1,100 ms at 50 users (41 creates/s), 1,000 ms at 20 users; p50 510 / 170 ms. Every service and the load generator share 2 vCPUs |
-| Outbox publish lag p99 < 1 s | met: p99 478 ms (p50 40 ms) at 50 users |
+| Payment-create latency p99 < 300 ms | **missed on both bench machines**: p99 1,100 ms at 50 users (41 creates/s), 1,000 ms at 20 users on a 2 vCPU VM; 1,800 ms at 50 users on a 3 CPU WSL2 laptop. Every service and the load generator share those CPUs |
+| Outbox publish lag p99 < 1 s | met: p99 478 ms (VM), 281 ms (laptop) at 50 users |
 | Webhook processing p99 < 5 s | not measured |
 | Payment-create availability 99.9% | not measured (no long-running deployment) |
 | Daily reconciliation: completes, 0 unexplained items | checked by every harness history |
@@ -287,7 +287,9 @@ itself, found by its self-tests. The full log, with failing sequences, is in
   serial: about 22 captures/s end to end on the bench machine, so at 50
   users (41 creates/s) the queue grows and time to capture reached p50 33 s,
   p99 53 s; at 20 users (20 creates/s) it was p50 2.7 s. Measured with
-  `make bench` on a 2 vCPU / 8 GB Linux VM, 2026-11-22. The
+  `make bench` on a 2 vCPU / 8 GB Linux VM, 2026-11-22. A WSL2 laptop
+  (3 CPUs, 3.8 GiB) shows the same shape: 27 creates/s against 11.7
+  captures/s (docs/benchmarks.md). The
   `psp_clearing`, `bank` and `psp_fees` hot rows are the next limit, not
   the first; more partitions and chargers come before them.
 - Every bench number comes from one machine running every service, the

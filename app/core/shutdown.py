@@ -14,6 +14,12 @@ A worker that is stopped finishes the item in hand, then leaves: the charger
 leaves its Kafka group, the relay releases its leader lock. A SIGKILL is
 still safe (every worker is crash-safe by design); this only makes ordinary
 stops quick and clean.
+
+"The item in hand" includes a call that is blocked: with the database
+unreachable, a round waits on its connection attempt, and the stop waits
+behind it until the container's grace period ends in SIGKILL, as before.
+Cancelling the round instead would end the same way (an aborted transaction
+rolls back) for more code, so it is not done.
 """
 
 import asyncio

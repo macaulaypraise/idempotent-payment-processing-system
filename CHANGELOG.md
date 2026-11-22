@@ -51,6 +51,17 @@ verification harness. Each build stage is tagged `v2-stage-N`.
   `.env` from before Stage 4, `POST /v1/reconciliations` could not reach the
   provider (502). Found by `make demo`.
 
+**Fixed after the developer's run (fix 1)**
+- `make setup` failed when `.env` names a custom Postgres superuser
+  (`psql -U IPPS` connects to a database named `IPPS`); it now connects to
+  `postgres`.
+- `test_shutdown.py` took the workers' database from the shell's
+  `DATABASE_URL` instead of the suite's migrated test database like every
+  other integration test; with a stale `.env.test` each round blocked on a
+  connection and the stop waited behind it. `app/core/shutdown.py` now says
+  plainly that a stop waits for a blocked call.
+- WSL2 laptop bench added to `docs/benchmarks.md`, the README and DESIGN.md.
+
 **Measured, and stated**
 - Create latency p99 is 1,000–1,100 ms on the 2 vCPU bench machine: the
   300 ms SLO is missed there. Outbox lag p99 478 ms meets its SLO.
