@@ -19,6 +19,11 @@
 # The runner reaches postgres, redis and the simulator directly (not through
 # Toxiproxy) for resets, ground truth and checks: the control plane is never
 # faulted, only the paths the system itself uses.
+#
+# Host ports stay below 32768, outside Linux's ephemeral range (32768-60999):
+# a port in that range can be held by any outgoing connection at the moment
+# compose binds it. The first ports chosen (55432, 58474, ...) failed the
+# nightly job once that way ("address already in use"), after image pulls.
 name: ipps-faults
 
 x-app: &app
@@ -63,7 +68,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: payments_faults
-    ports: ["${FAULTS_PG_PORT:-55432}:5432"]
+    ports: ["${FAULTS_PG_PORT:-25432}:5432"]
     tmpfs: [/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d payments_faults"]
@@ -73,7 +78,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports: ["${FAULTS_REDIS_PORT:-56379}:6379"]
+    ports: ["${FAULTS_REDIS_PORT:-26379}:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -113,8 +118,8 @@ services:
     volumes:
       - ./verification/toxiproxy.json:/config/toxiproxy.json:ro
     ports:
-      - "${FAULTS_TOXIPROXY_PORT:-58474}:8474"
-      - "${FAULTS_API_PORT:-58000}:18000" # the client's way in, through the proxy
+      - "${FAULTS_TOXIPROXY_PORT:-28474}:8474"
+      - "${FAULTS_API_PORT:-28000}:18000" # the client's way in, through the proxy
 
   migrate:
     build:
@@ -156,7 +161,7 @@ services:
     depends_on:
       toxiproxy:
         condition: service_started
-    ports: ["${FAULTS_SIM_PORT:-58001}:8001"] # control plane: ground truth, resets
+    ports: ["${FAULTS_SIM_PORT:-28001}:8001"] # control plane: ground truth, resets
     environment:
       PSP_SIM_DB_PATH: /data/psp_sim.db
       PSP_SIM_RESPONSE_TIMEOUT_SECONDS: "4" # "slow" outlives the 2 s client timeout

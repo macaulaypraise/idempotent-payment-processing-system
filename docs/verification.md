@@ -93,7 +93,7 @@ behind:
 ```bash
 python -m verification.checker --history .verify-faults/<seed>/history.jsonl \
   --ground-truth .verify-faults/<seed>/ground-truth.json \
-  --database-url postgresql+asyncpg://postgres:postgres@localhost:55432/payments_faults
+  --database-url postgresql+asyncpg://postgres:postgres@localhost:25432/payments_faults
 ```
 
 ## Does it catch bugs? (the self-test)
@@ -240,6 +240,22 @@ pass can reach the line.
 
 Dated, newest first. Each entry: what failed, the minimal sequence, the fix,
 the regression test.
+
+### 2026-11-23 — Fault stack could not start on a CI runner: host port in the ephemeral range (harness)
+
+- **Found by:** nightly run #4 (scheduled, 2026-11-23). The fault job
+  failed in 55 s, before any scenario: `failed to bind host port
+  0.0.0.0:58474/tcp: address already in use`. The state-machine job passed.
+- **Cause:** all five host ports of the fault stack (55432, 56379, 58000,
+  58001, 58474) were inside Linux's ephemeral range, 32768–60999, which the
+  kernel hands out to outgoing connections. The runner had just pulled four
+  images and built one; any of those connections can hold a port at the
+  moment compose binds it.
+- **Fix:** host ports 25432, 26379, 28000, 28001, 28474, all below the range.
+- **Regression test:** `test_the_fault_stack_publishes_no_port_in_the_ephemeral_range`
+  (fails on the old file, passes on the new).
+- **The gate:** the night counts as red. The five-night count restarts with
+  the first green night after this fix.
 
 ### 2026-11-22 — Database outages answered 500, not 503 (found by the fault layer; fixed in Stage 8)
 

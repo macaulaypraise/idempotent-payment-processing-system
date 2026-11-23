@@ -62,6 +62,12 @@ verification harness. Each build stage is tagged `v2-stage-N`.
   plainly that a stop waits for a blocked call.
 - WSL2 laptop bench added to `docs/benchmarks.md`, the README and DESIGN.md.
 
+**Fixed after nightly run #4 (fix 2)**
+- The fault stack published host ports inside Linux's ephemeral range
+  (32768–60999); on a CI runner one was already held by an outgoing
+  connection and the stack could not start. Ports moved to 25432, 26379,
+  28000, 28001, 28474, with a regression test.
+
 **Measured, and stated**
 - Create latency p99 is 1,000–1,100 ms on the 2 vCPU bench machine: the
   300 ms SLO is missed there. Outbox lag p99 478 ms meets its SLO.

@@ -181,3 +181,15 @@ async def test_an_unanswered_request_is_kept_for_after_healing() -> None:
         request = Request("create_refund", "/v1/refunds", "k2", {"payment_id": "p"})
         assert await client.until_answered(request, deadline=0.0) is None
     assert client.unanswered == [request]
+
+
+def test_the_fault_stack_publishes_no_port_in_the_ephemeral_range() -> None:
+    """Linux hands out 32768-60999 to outgoing connections; a host port there
+    can be taken at the moment compose binds it (the nightly job failed so,
+    on 58474, right after pulling images)."""
+    import re
+
+    compose = Path("docker-compose.faults.yml").read_text()
+    ports = [int(p) for p in re.findall(r"\$\{FAULTS_\w+:-(\d+)\}", compose)]
+    assert len(ports) == 5
+    assert all(1024 < port < 32768 for port in ports), ports

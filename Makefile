@@ -185,8 +185,8 @@ verify: ## State machine, nightly profile (300 random histories) + self-test; hi
 # FAULT_SCENARIOS, FAULT_SECONDS and FAULT_SEEDS=7,12 override the run.
 FAULTS_COMPOSE = docker compose -f docker-compose.faults.yml
 FAULTS_ENV = APP_ENV=test LOG_LEVEL=ERROR \
-	DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/payments_faults \
-	REDIS_URL=redis://localhost:56379/0 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+	DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:25432/payments_faults \
+	REDIS_URL=redis://localhost:26379/0 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 
 verify-faults: ## Fault layer: seeded scenarios against the full stack behind Toxiproxy + self-test (~10 min)
 	$(FAULTS_COMPOSE) up -d --build

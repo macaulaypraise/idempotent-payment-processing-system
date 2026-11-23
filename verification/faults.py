@@ -73,14 +73,14 @@ class Endpoints:
     Toxiproxy like any client; the rest is the control plane, reached
     directly so resets and checks are never faulted."""
 
-    api: str = _env("FAULTS_API_URL", "http://localhost:58000")
-    toxiproxy: str = _env("FAULTS_TOXIPROXY_URL", "http://localhost:58474")
-    sim: str = _env("FAULTS_SIM_URL", "http://localhost:58001")
+    api: str = _env("FAULTS_API_URL", "http://localhost:28000")
+    toxiproxy: str = _env("FAULTS_TOXIPROXY_URL", "http://localhost:28474")
+    sim: str = _env("FAULTS_SIM_URL", "http://localhost:28001")
     owner_url: str = _env(
         "FAULTS_OWNER_URL",
-        "postgresql+asyncpg://postgres:postgres@localhost:55432/payments_faults",
+        "postgresql+asyncpg://postgres:postgres@localhost:25432/payments_faults",
     )
-    redis_url: str = _env("FAULTS_REDIS_URL", "redis://localhost:56379/0")
+    redis_url: str = _env("FAULTS_REDIS_URL", "redis://localhost:26379/0")
 
 
 class ScenarioFailed(Exception):
